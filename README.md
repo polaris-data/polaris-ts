@@ -42,7 +42,7 @@ try {
 }
 ```
 
-If `apiKey` is omitted, the client reads `POLARIS_API_KEY` from the environment.
+The `apiKey` is optional — omit it to use public endpoints, or set the `POLARIS_API_KEY` environment variable.
 
 ### Async disposal (Node ≥ 18 / TypeScript ≥ 5.2)
 
@@ -94,7 +94,7 @@ Override with the `datasetRoot` constructor option or the `POLARIS_ROOT` environ
 
 ```ts
 new PolarisClient({
-  apiKey?: string,       // defaults to POLARIS_API_KEY env var
+  apiKey?: string,       // optional — omit for public access, or set POLARIS_API_KEY
   baseUrl?: string,       // defaults to "https://api.polaris.supply"
   timeout?: number,       // request timeout in ms (default 30 000)
   fetch?: FetchLike,      // custom fetch for testing / proxies

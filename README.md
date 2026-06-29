@@ -82,8 +82,7 @@ Inside the root:
 
 ```
 <root>/
-  data/       # Downloaded snapshot files (key-based paths)
-  hourly/     # Materialised hourly artifacts: <source>/<market>/<date>/<hour>.jsonl.zst
+  data/       # Rust-style snapshots: <tier>/<source>/<market>/<date>/<opaque-key>.jsonl.zst
   tmp/        # Temporary download parts
   cache/
 ```

@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { dirname } from "node:path";
 import { decompress } from "fzstd";
 
 import type {
@@ -33,8 +33,7 @@ import {
   resolveRoot,
   ensureLayout,
   dataFilePath,
-  hourlyFilePath,
-  linkOrCopy,
+  standardHourlyDataFilePath,
   fileExists,
   type StorageLayout,
 } from "./storage";
@@ -134,8 +133,8 @@ export class PolarisClient {
   /**
    * Return all standardised historical events for a time range.
    *
-   * Reads from locally-cached hourly `.jsonl.zst` snapshot files.
-   * Missing hourly artifacts are discovered via `GET /snapshots` and
+   * Reads from locally-cached standard snapshot files in `data/`.
+   * Missing hourly snapshots are discovered via `GET /snapshots` and
    * downloaded automatically.
    */
   async events(options: HistoricalQueryOptions): Promise<Json[]> {
@@ -156,7 +155,7 @@ export class PolarisClient {
   /**
    * Return all standardised trade events for a time range.
    *
-   * Reads from locally-cached hourly snapshot files, filtering to
+   * Reads from locally-cached standard snapshot files, filtering to
    * `type === "trade"`.
    */
   async trades(options: HistoricalQueryOptions): Promise<Json[]> {
@@ -178,7 +177,7 @@ export class PolarisClient {
   /**
    * Aggregate OHLCV bars from standardised trade data.
    *
-   * Reads from locally-cached hourly snapshot files and aggregates in memory
+   * Reads from locally-cached standard snapshot files and aggregates in memory
    * using the same interval-bucketing strategy as the Python SDK.
    */
   async ohlcv(options: OhlcvOptions): Promise<OhlcvBar[]> {
@@ -360,8 +359,8 @@ export class PolarisClient {
   // -----------------------------------------------------------------------
 
   /**
-   * Core routine: ensure hourly `.jsonl.zst` artifacts exist, decompress them,
-   * and yield matching events one at a time.
+   * Core routine: ensure hourly standard snapshots exist in `data/`,
+   * decompress them, and yield matching events one at a time.
    */
   private async *_readHourlyEvents(
     source: string,
@@ -372,7 +371,7 @@ export class PolarisClient {
   ): AsyncGenerator<Json> {
     const layout = await this._getLayout();
     const hours = hoursInRange(fromUs, toUs);
-    const filePaths = await this._ensureHourlyArtifacts(
+    const filePaths = await this._ensureHourlySnapshots(
       source,
       market,
       hours,
@@ -399,10 +398,10 @@ export class PolarisClient {
   }
 
   /**
-   * Ensure every requested hour has a materialised local artifact.
-   * Downloads missing snapshots and materialises them into `hourly/`.
+   * Ensure every requested hour has a local standard snapshot in `data/`.
+   * Downloads missing snapshots into the Rust-style snapshot layout.
    */
-  private async _ensureHourlyArtifacts(
+  private async _ensureHourlySnapshots(
     source: string,
     market: string,
     hours: Array<{ date: string; hour: number }>,
@@ -411,18 +410,18 @@ export class PolarisClient {
     const paths: string[] = [];
     if (hours.length === 0) return paths;
 
-    const missing = new Map<string, string>();
+    const missing = new Map<string, { date: string; hour: number }>();
     for (const { date, hour } of hours) {
-      const hourlyPath = hourlyFilePath(
-        layout.hourlyDir,
+      const dataPath = standardHourlyDataFilePath(
+        layout.dataDir,
         source,
         market,
         date,
         hour,
       );
-      paths.push(hourlyPath);
-      if (!(await fileExists(hourlyPath))) {
-        missing.set(hourBucketKey(date, hour), hourlyPath);
+      paths.push(dataPath);
+      if (!(await fileExists(dataPath))) {
+        missing.set(hourBucketKey(date, hour), { date, hour });
       }
     }
 
@@ -438,9 +437,8 @@ export class PolarisClient {
     for (const entry of snapshots) {
       const hour = entry.hour ?? 0;
       const bucket = hourBucketKey(entry.date, hour);
-      const hourlyPath = missing.get(bucket);
-      if (!hourlyPath) continue;
-      await this._downloadAndMaterialise(entry.key, hourlyPath, layout);
+      if (!missing.has(bucket)) continue;
+      await this._downloadSnapshot(entry.key, layout);
       missing.delete(bucket);
     }
 
@@ -455,12 +453,10 @@ export class PolarisClient {
   }
 
   /**
-   * Download a snapshot to `data/` and create a hardlink (or copy) into
-   * `hourly/`.
+   * Download a snapshot into the Rust-style `data/` tree.
    */
-  private async _downloadAndMaterialise(
+  private async _downloadSnapshot(
     key: string,
-    hourlyPath: string,
     layout: StorageLayout,
   ): Promise<void> {
     const dataPath = dataFilePath(layout.dataDir, key);
@@ -479,8 +475,6 @@ export class PolarisClient {
       await mkdir(dirname(dataPath), { recursive: true });
       await writeFile(dataPath, buffer);
     }
-
-    await linkOrCopy(dataPath, hourlyPath);
   }
 
   // -----------------------------------------------------------------------

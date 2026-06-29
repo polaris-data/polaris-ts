@@ -1,5 +1,5 @@
-import { mkdir, stat, link, copyFile } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { mkdir, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { homedir, platform } from "node:os";
 
 // ---------------------------------------------------------------------------
@@ -9,7 +9,6 @@ import { homedir, platform } from "node:os";
 export interface StorageLayout {
   readonly root: string;
   readonly dataDir: string;
-  readonly hourlyDir: string;
   readonly tmpDir: string;
   readonly cacheDir: string;
 }
@@ -63,55 +62,111 @@ function defaultRoot(): string {
 /** Ensure the standard sub-directory tree exists and return the layout. */
 export async function ensureLayout(root: string): Promise<StorageLayout> {
   const dataDir = join(root, "data");
-  const hourlyDir = join(root, "hourly");
   const tmpDir = join(root, "tmp");
   const cacheDir = join(root, "cache");
 
   await Promise.all([
     mkdir(dataDir, { recursive: true }),
-    mkdir(hourlyDir, { recursive: true }),
     mkdir(tmpDir, { recursive: true }),
     mkdir(cacheDir, { recursive: true }),
   ]);
 
-  return { root, dataDir, hourlyDir, tmpDir, cacheDir };
+  return { root, dataDir, tmpDir, cacheDir };
 }
 
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/** Path for a downloaded snapshot file in the `data/` tree. */
-export function dataFilePath(dataDir: string, key: string): string {
-  return join(dataDir, key);
+const SNAPSHOT_EXT = ".jsonl.zst";
+
+export interface SnapshotKeyParts {
+  readonly tier: string;
+  readonly source: string;
+  readonly market: string;
+  readonly date: string;
+  readonly hour: number;
+  readonly opaqueKey: string;
+  readonly filename: string;
 }
 
-/** Path for a materialised hourly artifact in the `hourly/` tree. */
-export function hourlyFilePath(
-  hourlyDir: string,
+/** Parse an opaque Polaris snapshot key into its storage path components. */
+export function parseSnapshotKey(key: string): SnapshotKeyParts {
+  const opaqueKey = key.endsWith(SNAPSHOT_EXT)
+    ? key.slice(0, -SNAPSHOT_EXT.length)
+    : key;
+  const parts = opaqueKey.split("-");
+  if (parts.length < 7) {
+    throw new Error(`Invalid snapshot key: ${key}`);
+  }
+
+  const tier = parts[0];
+  const source = parts[1];
+  const hourPart = parts.at(-1);
+  const day = parts.at(-2);
+  const month = parts.at(-3);
+  const year = parts.at(-4);
+  const market = parts.slice(2, -4).join("-");
+
+  if (
+    !tier ||
+    !source ||
+    !market ||
+    !year ||
+    !month ||
+    !day ||
+    !hourPart ||
+    !/^\d{4}$/.test(year) ||
+    !/^\d{2}$/.test(month) ||
+    !/^\d{2}$/.test(day) ||
+    !/^\d{2}$/.test(hourPart)
+  ) {
+    throw new Error(`Invalid snapshot key: ${key}`);
+  }
+
+  return {
+    tier,
+    source,
+    market,
+    date: `${year}-${month}-${day}`,
+    hour: Number(hourPart),
+    opaqueKey,
+    filename: `${opaqueKey}${SNAPSHOT_EXT}`,
+  };
+}
+
+/** Build the canonical standard snapshot key for a source/market/hour. */
+export function standardSnapshotKey(
   source: string,
   market: string,
   date: string,
   hour: number,
 ): string {
-  return join(hourlyDir, source, market, date, `${String(hour).padStart(2, "0")}.jsonl.zst`);
+  return `standard-${source}-${market}-${date}-${String(hour).padStart(2, "0")}`;
 }
 
-// ---------------------------------------------------------------------------
-// Filesystem utilities
-// ---------------------------------------------------------------------------
+/** Path for a downloaded snapshot file in the Rust-style `data/` tree. */
+export function dataFilePath(dataDir: string, key: string): string {
+  const parsed = parseSnapshotKey(key);
+  return join(
+    dataDir,
+    parsed.tier,
+    parsed.source,
+    parsed.market,
+    parsed.date,
+    parsed.filename,
+  );
+}
 
-/**
- * Create a hardlink from `src` to `dest`, falling back to a copy.
- * Creates parent directories of `dest` as needed.
- */
-export async function linkOrCopy(src: string, dest: string): Promise<void> {
-  await mkdir(dirname(dest), { recursive: true });
-  try {
-    await link(src, dest);
-  } catch {
-    await copyFile(src, dest);
-  }
+/** Path for a standard hourly snapshot file in the Rust-style `data/` tree. */
+export function standardHourlyDataFilePath(
+  dataDir: string,
+  source: string,
+  market: string,
+  date: string,
+  hour: number,
+): string {
+  return dataFilePath(dataDir, standardSnapshotKey(source, market, date, hour));
 }
 
 /** Return `true` when the file at `path` exists. */

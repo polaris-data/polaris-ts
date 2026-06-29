@@ -179,12 +179,16 @@ export interface CatalogOptions {
   market?: string;
 }
 
-/** Options for snapshot-based historical data methods. `from` and `to` are required. */
+/**
+ * Options for snapshot-based historical data methods.
+ * If `from` and/or `to` are omitted, the client infers a bounded window
+ * from catalog metadata.
+ */
 export interface HistoricalQueryOptions {
   source: string;
   market: string;
-  from: TimeInput;
-  to: TimeInput;
+  from?: TimeInput;
+  to?: TimeInput;
 }
 
 export interface ListSnapshotsOptions {
@@ -195,7 +199,7 @@ export interface ListSnapshotsOptions {
   limit?: number;
 }
 
-/** Options for the /raw endpoint. `from`/`to` are optional (defaults to 24 h lookback). */
+/** Options for the /raw endpoint shape. `from`/`to` are optional. */
 export interface RawQueryOptions {
   source: string;
   market: string;
@@ -212,8 +216,8 @@ export interface OhlcvOptions extends HistoricalQueryOptions {
 export interface ReplayOptions {
   source: string;
   market: string;
-  from: TimeInput;
-  to: TimeInput;
+  from?: TimeInput;
+  to?: TimeInput;
   /** `true` (default) streams standardised events from local snapshots. */
   standard?: boolean;
 }

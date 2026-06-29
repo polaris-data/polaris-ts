@@ -60,8 +60,8 @@ export interface CatalogMarket {
 
 export interface StandardEvent {
   timestamp: number;
-  venue: string;
-  symbol: string;
+  source: string;
+  market: string;
   type: string;
   data: Record<string, unknown>;
 }
@@ -120,7 +120,8 @@ export interface TradingViewOhlcvResponse {
 export interface SnapshotEntry {
   date: string;
   key: string;
-  filename: string;
+  hour?: number;
+  filename?: string;
 }
 
 export interface SnapshotsResponse {
@@ -139,7 +140,7 @@ export interface SnapshotsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot download – GET /snapshots/download
+// Snapshot download – GET /download
 // ---------------------------------------------------------------------------
 
 export interface DownloadUrlResponse {
@@ -219,6 +220,5 @@ export interface ReplayOptions {
 
 export interface DownloadSnapshotOptions {
   key: string;
-  filename?: string;
   mode?: "url" | "json";
 }

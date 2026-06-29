@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { join, dirname } from "node:path";
+import { dirname } from "node:path";
 import { decompress } from "fzstd";
 
 import type {
@@ -28,13 +28,12 @@ import {
   RateLimitedError,
 } from "./errors";
 
-import { toIso8601, toEpochUs, datesInRange } from "./utils";
+import { toIso8601, toEpochUs, hoursInRange } from "./utils";
 import {
   resolveRoot,
   ensureLayout,
   dataFilePath,
-  dailyFilePath,
-  linkOrCopy,
+  standardHourlyDataFilePath,
   fileExists,
   type StorageLayout,
 } from "./storage";
@@ -57,6 +56,8 @@ interface FetchOptions {
   auth?: AuthMode;
   headers?: Record<string, string>;
 }
+
+type RedirectMode = "error" | "follow" | "manual";
 
 // ===========================================================================
 // PolarisClient
@@ -132,15 +133,15 @@ export class PolarisClient {
   /**
    * Return all standardised historical events for a time range.
    *
-   * Reads from locally-cached daily `.jsonl.zst` snapshot files.
-   * Missing daily artifacts are discovered via `GET /snapshots` and
+   * Reads from locally-cached standard snapshot files in `data/`.
+   * Missing hourly snapshots are discovered via `GET /snapshots` and
    * downloaded automatically.
    */
   async events(options: HistoricalQueryOptions): Promise<Json[]> {
     const fromUs = toEpochUs(options.from);
     const toUs = toEpochUs(options.to);
     const result: Json[] = [];
-    for await (const event of this._readDailyEvents(
+    for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
       fromUs,
@@ -154,14 +155,14 @@ export class PolarisClient {
   /**
    * Return all standardised trade events for a time range.
    *
-   * Reads from locally-cached daily snapshot files, filtering to
+   * Reads from locally-cached standard snapshot files, filtering to
    * `type === "trade"`.
    */
   async trades(options: HistoricalQueryOptions): Promise<Json[]> {
     const fromUs = toEpochUs(options.from);
     const toUs = toEpochUs(options.to);
     const result: Json[] = [];
-    for await (const event of this._readDailyEvents(
+    for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
       fromUs,
@@ -176,7 +177,7 @@ export class PolarisClient {
   /**
    * Aggregate OHLCV bars from standardised trade data.
    *
-   * Reads from locally-cached daily snapshot files and aggregates in memory
+   * Reads from locally-cached standard snapshot files and aggregates in memory
    * using the same interval-bucketing strategy as the Python SDK.
    */
   async ohlcv(options: OhlcvOptions): Promise<OhlcvBar[]> {
@@ -184,7 +185,7 @@ export class PolarisClient {
     const toUs = toEpochUs(options.to);
     const agg = new OhlcvAggregator(options.interval);
 
-    for await (const event of this._readDailyEvents(
+    for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
       fromUs,
@@ -228,7 +229,8 @@ export class PolarisClient {
    * Stream historical events as an async iterable.
    *
    * Defaults to standardised events from local snapshots (`standard: true`).
-   * Pass `standard: false` to stream raw payloads via the `/raw` endpoint.
+   * `standard: false` is not supported because historical reads are
+   * restricted to snapshot discovery plus `GET /download`.
    *
    * @example
    * ```ts
@@ -246,14 +248,16 @@ export class PolarisClient {
     if (options.standard !== false) {
       const fromUs = toEpochUs(options.from);
       const toUs = toEpochUs(options.to);
-      yield* this._readDailyEvents(
+      yield* this._readHourlyEvents(
         options.source,
         options.market,
         fromUs,
         toUs,
       );
     } else {
-      yield* this._streamRaw(options);
+      throw new PolarisError(
+        "replay({ standard: false }) is not supported by the TypeScript SDK. Use snapshot-backed replay instead.",
+      );
     }
   }
 
@@ -262,12 +266,16 @@ export class PolarisClient {
   // -----------------------------------------------------------------------
 
   /**
-   * Return raw venue-native payloads for a time range.
-   * Requires an API key. Uses the `/raw` endpoint with pagination.
+   * Raw endpoint access is intentionally disabled in the TypeScript SDK.
+   *
+   * Historical data access is snapshot-first: discover files via
+   * `GET /snapshots` and fetch artifacts via `GET /download`.
    */
   async raw(options: RawQueryOptions): Promise<Json[]> {
-    const params = buildRawParams(options);
-    return this._paginateAll("/raw", params, "required");
+    void options;
+    throw new PolarisError(
+      "Direct /raw access is not supported by the TypeScript SDK. Use snapshot-backed methods or download snapshots via GET /download.",
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -284,14 +292,17 @@ export class PolarisClient {
     options: DownloadSnapshotOptions,
   ): Promise<Response> {
     const params: Record<string, string> = { key: options.key };
-    if (options.filename) params.filename = options.filename;
     if (options.mode) params.mode = options.mode;
 
-    const { response, body } = await this._fetchRaw("/snapshots/download", {
+    const response = await this._request("/download", {
       params,
       auth: "if-available",
+      redirect: "follow",
     });
-    assertOk(response, body);
+    if (!response.ok) {
+      const body = await response.text();
+      assertOk(response, body);
+    }
     return response;
   }
 
@@ -302,12 +313,33 @@ export class PolarisClient {
   async getSnapshotDownloadUrl(
     options: DownloadSnapshotOptions,
   ): Promise<DownloadUrlResponse> {
-    const params: Record<string, string> = { key: options.key, mode: "url" };
-    if (options.filename) params.filename = options.filename;
-    return this._getJson("/snapshots/download", {
-      params,
+    const response = await this._request("/download", {
+      params: { key: options.key, mode: "url" },
       auth: "if-available",
+      redirect: "manual",
+      headers: { Accept: "application/json" },
     });
+
+    const location = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && location) {
+      return { url: location, filename: inferFilename(location) };
+    }
+
+    const body = await response.text();
+    assertOk(response, body);
+
+    let json: unknown;
+    try {
+      json = JSON.parse(body);
+    } catch {
+      throw new PolarisError("Failed to parse response as JSON");
+    }
+
+    if (typeof json !== "object" || json === null || Array.isArray(json)) {
+      throw new PolarisError("Expected a JSON object response");
+    }
+
+    return json as DownloadUrlResponse;
   }
 
   // -----------------------------------------------------------------------
@@ -327,10 +359,10 @@ export class PolarisClient {
   // -----------------------------------------------------------------------
 
   /**
-   * Core routine: ensure daily `.jsonl.zst` artifacts exist, decompress them,
-   * and yield matching events one at a time.
+   * Core routine: ensure hourly standard snapshots exist in `data/`,
+   * decompress them, and yield matching events one at a time.
    */
-  private async *_readDailyEvents(
+  private async *_readHourlyEvents(
     source: string,
     market: string,
     fromUs: number,
@@ -338,16 +370,16 @@ export class PolarisClient {
     filter?: (event: Json) => boolean,
   ): AsyncGenerator<Json> {
     const layout = await this._getLayout();
-    const dates = datesInRange(fromUs, toUs);
-    const filePaths = await this._ensureDailyArtifacts(
+    const hours = hoursInRange(fromUs, toUs);
+    const filePaths = await this._ensureHourlySnapshots(
       source,
       market,
-      dates,
+      hours,
       layout,
     );
 
     for (const filePath of filePaths) {
-      const lines = await readDailyLines(filePath);
+      const lines = await readSnapshotLines(filePath);
       for (const line of lines) {
         let event: Json;
         try {
@@ -366,62 +398,72 @@ export class PolarisClient {
   }
 
   /**
-   * Ensure every requested date has a materialised daily artifact.
-   * Downloads missing snapshots and materialises them into `daily/`.
+   * Ensure every requested hour has a local standard snapshot in `data/`.
+   * Downloads missing snapshots into the Rust-style snapshot layout.
    */
-  private async _ensureDailyArtifacts(
+  private async _ensureHourlySnapshots(
     source: string,
     market: string,
-    dates: string[],
+    hours: Array<{ date: string; hour: number }>,
     layout: StorageLayout,
   ): Promise<string[]> {
     const paths: string[] = [];
+    if (hours.length === 0) return paths;
 
-    for (const date of dates) {
-      const dailyPath = dailyFilePath(layout.dailyDir, source, market, date);
-
-      if (await fileExists(dailyPath)) {
-        paths.push(dailyPath);
-        continue;
-      }
-
-      // Discover and download the snapshot for this date
-      const snapshots = await this.listSnapshots({
+    const missing = new Map<string, { date: string; hour: number }>();
+    for (const { date, hour } of hours) {
+      const dataPath = standardHourlyDataFilePath(
+        layout.dataDir,
         source,
         market,
-        from: `${date}T00:00:00Z`,
-        to: `${date}T23:59:59Z`,
-      });
-
-      const entry = snapshots.find((s) => s.date === date);
-      if (!entry) {
-        throw new PolarisError(
-          `No snapshot available for ${source}/${market} on ${date}`,
-        );
+        date,
+        hour,
+      );
+      paths.push(dataPath);
+      if (!(await fileExists(dataPath))) {
+        missing.set(hourBucketKey(date, hour), { date, hour });
       }
+    }
 
-      await this._downloadAndMaterialise(entry.key, dailyPath, layout);
-      paths.push(dailyPath);
+    if (missing.size === 0) return paths;
+
+    const snapshots = await this.listSnapshots({
+      source,
+      market,
+      from: `${hours[0].date}T${formatHour(hours[0].hour)}:00:00Z`,
+      to: `${hours[hours.length - 1].date}T${formatHour(hours[hours.length - 1].hour)}:59:59Z`,
+    });
+
+    for (const entry of snapshots) {
+      const hour = entry.hour ?? 0;
+      const bucket = hourBucketKey(entry.date, hour);
+      if (!missing.has(bucket)) continue;
+      await this._downloadSnapshot(entry.key, layout);
+      missing.delete(bucket);
+    }
+
+    if (missing.size > 0) {
+      const [bucket] = missing.keys();
+      throw new PolarisError(
+        `No snapshot available for ${source}/${market} during ${bucket.replace("T", " ")}`,
+      );
     }
 
     return paths;
   }
 
   /**
-   * Download a snapshot to `data/` and create a hardlink (or copy) into
-   * `daily/`.
+   * Download a snapshot into the Rust-style `data/` tree.
    */
-  private async _downloadAndMaterialise(
+  private async _downloadSnapshot(
     key: string,
-    dailyPath: string,
     layout: StorageLayout,
   ): Promise<void> {
     const dataPath = dataFilePath(layout.dataDir, key);
 
     // Download if we don't already have it in data/
     if (!(await fileExists(dataPath))) {
-      const urlInfo = await this.getSnapshotDownloadUrl({ key });
-      const response = await this._fetch(urlInfo.url);
+      const response = await this.downloadSnapshot({ key });
 
       if (!response.ok) {
         throw new PolarisError(
@@ -433,36 +475,6 @@ export class PolarisClient {
       await mkdir(dirname(dataPath), { recursive: true });
       await writeFile(dataPath, buffer);
     }
-
-    await linkOrCopy(dataPath, dailyPath);
-  }
-
-  // -----------------------------------------------------------------------
-  // Internals – raw endpoint streaming
-  // -----------------------------------------------------------------------
-
-  private async *_streamRaw(
-    options: ReplayOptions,
-  ): AsyncGenerator<Json> {
-    const params: Record<string, string> = {
-      source: options.source,
-      market: options.market,
-      from: toIso8601(options.from),
-      to: toIso8601(options.to),
-    };
-    let cursor: string | undefined;
-
-    do {
-      if (cursor) params.cursor = cursor;
-      const res = await this._getJson<PaginatedResponse<Json>>("/raw", {
-        params,
-        auth: "required",
-      });
-      for (const item of res.data) {
-        yield item;
-      }
-      cursor = res.next_cursor ?? undefined;
-    } while (cursor);
   }
 
   // -----------------------------------------------------------------------
@@ -498,30 +510,38 @@ export class PolarisClient {
     path: string,
     opts: FetchOptions = {},
   ): Promise<{ response: Response; body: string }> {
+    const response = await this._request(path, {
+      ...opts,
+      redirect: "follow",
+    });
+    const body = await response.text();
+    return { response, body };
+  }
+
+  private async _request(
+    path: string,
+    opts: FetchOptions & { redirect?: RedirectMode } = {},
+  ): Promise<Response> {
     const headers = this._buildHeaders(opts.auth ?? "none", opts.headers);
     const url = this._buildUrl(path, opts.params);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this._timeout);
 
-    let response: Response;
     try {
-      response = await this._fetch(url, {
+      return await this._fetch(url, {
         headers,
         signal: controller.signal,
-        redirect: "follow",
+        redirect: opts.redirect ?? "follow",
       });
     } catch (e) {
-      clearTimeout(timer);
       if (e instanceof Error && e.name === "AbortError") {
         throw new PolarisError("Request timed out");
       }
       throw new PolarisError(`Request failed: ${e}`);
+    } finally {
+      clearTimeout(timer);
     }
-
-    clearTimeout(timer);
-    const body = await response.text();
-    return { response, body };
   }
 
   private _buildHeaders(
@@ -604,18 +624,6 @@ function readEnvApiKey(): string | undefined {
   }
 }
 
-function buildRawParams(options: RawQueryOptions): Record<string, string> {
-  const p: Record<string, string> = {
-    source: options.source,
-    market: options.market,
-  };
-  if (options.from !== undefined) p.from = toIso8601(options.from);
-  if (options.to !== undefined) p.to = toIso8601(options.to);
-  if (options.limit !== undefined) p.limit = String(options.limit);
-  if (options.format) p.format = options.format;
-  return p;
-}
-
 function buildSnapshotParams(
   options: ListSnapshotsOptions,
 ): Record<string, string> {
@@ -658,12 +666,36 @@ function assertOk(response: Response, body: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Daily file reading (zstd + NDJSON)
+// Snapshot file reading (zstd + NDJSON)
 // ---------------------------------------------------------------------------
 
-async function readDailyLines(filePath: string): Promise<string[]> {
+async function readSnapshotLines(filePath: string): Promise<string[]> {
   const compressed = await readFile(filePath);
   const decompressed = decompress(compressed);
   const text = new TextDecoder().decode(decompressed);
   return text.split("\n").filter((l) => l.trim().length > 0);
+}
+
+function formatHour(hour: number): string {
+  return String(hour).padStart(2, "0");
+}
+
+function hourBucketKey(date: string, hour: number): string {
+  return `${date}T${formatHour(hour)}`;
+}
+
+function inferFilename(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const fromDisposition = parsed.searchParams.get("response-content-disposition");
+    if (fromDisposition) {
+      const match = fromDisposition.match(/filename="?([^";]+)"?/);
+      if (match) return match[1];
+    }
+
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    return parts.at(-1);
+  } catch {
+    return undefined;
+  }
 }

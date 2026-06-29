@@ -59,6 +59,20 @@ interface FetchOptions {
 
 type RedirectMode = "error" | "follow" | "manual";
 
+interface ResolvedHistoricalRange {
+  fromUs: number;
+  toUs: number;
+}
+
+interface CatalogMarketBounds {
+  startUs: number;
+  endUs: number;
+  accessStatus?: string;
+  publicCutoffUs?: number;
+}
+
+const DEFAULT_INFERRED_LOOKBACK_US = 7 * 24 * 60 * 60 * 1_000_000;
+
 // ===========================================================================
 // PolarisClient
 // ===========================================================================
@@ -138,8 +152,7 @@ export class PolarisClient {
    * downloaded automatically.
    */
   async events(options: HistoricalQueryOptions): Promise<Json[]> {
-    const fromUs = toEpochUs(options.from);
-    const toUs = toEpochUs(options.to);
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
     const result: Json[] = [];
     for await (const event of this._readHourlyEvents(
       options.source,
@@ -159,8 +172,7 @@ export class PolarisClient {
    * `type === "trade"`.
    */
   async trades(options: HistoricalQueryOptions): Promise<Json[]> {
-    const fromUs = toEpochUs(options.from);
-    const toUs = toEpochUs(options.to);
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
     const result: Json[] = [];
     for await (const event of this._readHourlyEvents(
       options.source,
@@ -181,8 +193,7 @@ export class PolarisClient {
    * using the same interval-bucketing strategy as the Python SDK.
    */
   async ohlcv(options: OhlcvOptions): Promise<OhlcvBar[]> {
-    const fromUs = toEpochUs(options.from);
-    const toUs = toEpochUs(options.to);
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
     const agg = new OhlcvAggregator(options.interval);
 
     for await (const event of this._readHourlyEvents(
@@ -246,8 +257,7 @@ export class PolarisClient {
    */
   async *replay(options: ReplayOptions): AsyncGenerator<Json> {
     if (options.standard !== false) {
-      const fromUs = toEpochUs(options.from);
-      const toUs = toEpochUs(options.to);
+      const { fromUs, toUs } = await this._resolveHistoricalRange(options);
       yield* this._readHourlyEvents(
         options.source,
         options.market,
@@ -357,6 +367,88 @@ export class PolarisClient {
   // -----------------------------------------------------------------------
   // Internals – snapshot-first local reads
   // -----------------------------------------------------------------------
+
+  private async _resolveHistoricalRange(
+    options: Pick<HistoricalQueryOptions, "source" | "market" | "from" | "to">,
+  ): Promise<ResolvedHistoricalRange> {
+    if (options.from !== undefined && options.to !== undefined) {
+      const fromUs = toEpochUs(options.from);
+      const toUs = toEpochUs(options.to);
+      assertValidRange(fromUs, toUs);
+      return { fromUs, toUs };
+    }
+
+    const bounds = await this._catalogMarketBounds(options.source, options.market);
+
+    if (bounds.accessStatus === "restricted" && !this._apiKey) {
+      throw new UnauthorizedError(
+        `API key is required to infer a default range for restricted dataset '${options.source}/${options.market}'`,
+      );
+    }
+
+    const lowerBoundUs = bounds.startUs;
+    let upperBoundUs = Math.min(bounds.endUs, Date.now() * 1000);
+
+    if (!this._apiKey && bounds.publicCutoffUs !== undefined) {
+      upperBoundUs = Math.min(upperBoundUs, bounds.publicCutoffUs);
+    }
+
+    if (lowerBoundUs >= upperBoundUs) {
+      throw new PolarisError(
+        `Catalog reported no queryable historical range for '${options.source}/${options.market}'`,
+      );
+    }
+
+    let fromUs: number;
+    let toUs: number;
+
+    if (options.from === undefined && options.to === undefined) {
+      toUs = upperBoundUs;
+      fromUs = Math.max(lowerBoundUs, toUs - DEFAULT_INFERRED_LOOKBACK_US);
+    } else if (options.from === undefined) {
+      toUs = Math.min(toEpochUs(options.to as NonNullable<typeof options.to>), upperBoundUs);
+      fromUs = Math.max(lowerBoundUs, toUs - DEFAULT_INFERRED_LOOKBACK_US);
+    } else {
+      fromUs = Math.max(toEpochUs(options.from), lowerBoundUs);
+      toUs = Math.min(fromUs + DEFAULT_INFERRED_LOOKBACK_US, upperBoundUs);
+    }
+
+    assertValidRange(fromUs, toUs, "from must resolve to a time before to");
+    return { fromUs, toUs };
+  }
+
+  private async _catalogMarketBounds(
+    source: string,
+    market: string,
+  ): Promise<CatalogMarketBounds> {
+    const payload = await this.catalog({ source, market });
+
+    for (const catalogSource of payload.sources) {
+      if (catalogSource.id !== source) continue;
+
+      for (const catalogMarket of catalogSource.markets) {
+        if (catalogMarket.id !== market) continue;
+        if (!catalogMarket.start || !catalogMarket.end) {
+          throw new PolarisError(
+            `Catalog entry for '${source}/${market}' did not include valid start/end timestamps`,
+          );
+        }
+
+        const accessStatus = catalogMarket.access?.status?.trim().toLowerCase();
+
+        return {
+          startUs: toEpochUs(catalogMarket.start),
+          endUs: toEpochUs(catalogMarket.end),
+          accessStatus: accessStatus || undefined,
+          publicCutoffUs: endOfPublicCutoffDayUs(
+            catalogMarket.access?.public_cutoff_date,
+          ),
+        };
+      }
+    }
+
+    throw new NotFoundError(`Catalog did not include dataset '${source}/${market}'`);
+  }
 
   /**
    * Core routine: ensure hourly standard snapshots exist in `data/`,
@@ -698,4 +790,23 @@ function inferFilename(url: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function assertValidRange(
+  fromUs: number,
+  toUs: number,
+  message = "from must be before to",
+): void {
+  if (fromUs >= toUs) {
+    throw new PolarisError(message);
+  }
+}
+
+function endOfPublicCutoffDayUs(dateText: string | undefined): number | undefined {
+  if (!dateText) return undefined;
+
+  const startMs = Date.parse(`${dateText}T00:00:00Z`);
+  if (Number.isNaN(startMs)) return undefined;
+
+  return (startMs + 24 * 60 * 60 * 1000) * 1000;
 }

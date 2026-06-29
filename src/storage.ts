@@ -9,7 +9,7 @@ import { homedir, platform } from "node:os";
 export interface StorageLayout {
   readonly root: string;
   readonly dataDir: string;
-  readonly dailyDir: string;
+  readonly hourlyDir: string;
   readonly tmpDir: string;
   readonly cacheDir: string;
 }
@@ -63,18 +63,18 @@ function defaultRoot(): string {
 /** Ensure the standard sub-directory tree exists and return the layout. */
 export async function ensureLayout(root: string): Promise<StorageLayout> {
   const dataDir = join(root, "data");
-  const dailyDir = join(root, "daily");
+  const hourlyDir = join(root, "hourly");
   const tmpDir = join(root, "tmp");
   const cacheDir = join(root, "cache");
 
   await Promise.all([
     mkdir(dataDir, { recursive: true }),
-    mkdir(dailyDir, { recursive: true }),
+    mkdir(hourlyDir, { recursive: true }),
     mkdir(tmpDir, { recursive: true }),
     mkdir(cacheDir, { recursive: true }),
   ]);
 
-  return { root, dataDir, dailyDir, tmpDir, cacheDir };
+  return { root, dataDir, hourlyDir, tmpDir, cacheDir };
 }
 
 // ---------------------------------------------------------------------------
@@ -86,14 +86,15 @@ export function dataFilePath(dataDir: string, key: string): string {
   return join(dataDir, key);
 }
 
-/** Path for a materialised daily artifact in the `daily/` tree. */
-export function dailyFilePath(
-  dailyDir: string,
+/** Path for a materialised hourly artifact in the `hourly/` tree. */
+export function hourlyFilePath(
+  hourlyDir: string,
   source: string,
   market: string,
   date: string,
+  hour: number,
 ): string {
-  return join(dailyDir, source, market, `${date}.jsonl.zst`);
+  return join(hourlyDir, source, market, date, `${String(hour).padStart(2, "0")}.jsonl.zst`);
 }
 
 // ---------------------------------------------------------------------------

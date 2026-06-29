@@ -62,11 +62,11 @@ console.log(`Fetched ${rows.length} events`);
 
 ## Snapshot-first architecture
 
-Standardised historical data (`events`, `trades`, `ohlcv`, and `replay`) uses a **snapshot-first** approach that matches the Python SDK:
+Standardised historical data (`events`, `trades`, `ohlcv`, and `replay`) uses a **snapshot-first** approach:
 
-1. Daily `.jsonl.zst` snapshot files are discovered via `GET /snapshots` and downloaded to a local dataset root on first access.
+1. Hourly `.jsonl.zst` snapshot files are discovered via `GET /snapshots` and downloaded via `GET /download` on first access.
 2. Subsequent calls for the same date range read from the local cache — no network round-trips.
-3. If a requested date has no available snapshot, the SDK raises a `PolarisError` rather than silently falling back.
+3. If a requested hour has no available snapshot, the SDK raises a `PolarisError` rather than silently falling back.
 
 ### Local dataset root
 
@@ -83,7 +83,7 @@ Inside the root:
 ```
 <root>/
   data/       # Downloaded snapshot files (key-based paths)
-  daily/      # Materialised daily artifacts: <source>/<market>/<date>.jsonl.zst
+  hourly/     # Materialised hourly artifacts: <source>/<market>/<date>/<hour>.jsonl.zst
   tmp/        # Temporary download parts
   cache/
 ```
@@ -121,19 +121,14 @@ new PolarisClient({
 | `ohlcvTradingView(opts)` | TradingView-shaped OHLCV from local snapshots |
 
 All snapshot-based methods require `from` and `to` (ISO 8601 strings, `Date`, or epoch microseconds).
-
-### Raw data (API-only)
-
-| Method | Description |
-| --- | --- |
-| `raw(opts)` | Raw venue-native payloads via `/raw` (requires API key) |
+`replay({ standard: false })` is not supported in the TypeScript SDK.
 
 ### Downloads
 
 | Method | Description |
 | --- | --- |
-| `downloadSnapshot(opts)` | Download a snapshot file (returns native `Response`) |
-| `getSnapshotDownloadUrl(opts)` | Get a pre-signed download URL |
+| `downloadSnapshot(opts)` | Download a snapshot file from `GET /download` (returns native `Response`) |
+| `getSnapshotDownloadUrl(opts)` | Get the resolved download URL for a snapshot |
 
 ## Examples
 
@@ -158,7 +153,7 @@ import { PolarisClient } from "polaris-data";
 
 const client = new PolarisClient({ apiKey: "polaris_key_your_key" });
 
-// First call downloads the snapshot; subsequent calls read locally
+// First call downloads the hourly snapshot; subsequent calls read locally
 const rows = await client.events({
   source: "binance",
   market: "BTC-USDT",
@@ -238,12 +233,12 @@ const snapshots = await client.listSnapshots({
   to: "2024-01-07T00:00:00Z",
 });
 for (const s of snapshots) {
-  console.log(s.key, s.filename);
+  console.log(s.date, s.hour, s.key);
 }
 
 // Download a snapshot file
 const response = await client.downloadSnapshot({
-  key: "snapshots/standard/hyperliquid/BTC-USD/2024-01-01.jsonl.zst",
+  key: "standard-hyperliquid-BTC-2026-06-27-00",
 });
 const buffer = await response.arrayBuffer();
 ```

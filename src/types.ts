@@ -33,24 +33,26 @@ export interface PaginatedResponse<T = Record<string, unknown>> {
 // ---------------------------------------------------------------------------
 
 export interface CatalogResponse {
-  sources: CatalogSource[];
   updatedAt: string;
+  markets: CatalogMarket[];
 }
 
+/** Grouped source view retained for compatibility with older SDK examples. */
 export interface CatalogSource {
   id: string;
   markets: CatalogMarket[];
 }
 
 export interface CatalogMarket {
-  id: string;
+  source: string;
+  market: string;
   start?: string;
   end?: string;
-  source?: string;
+  source_type?: string;
   categories?: string[];
   access?: {
     status: string;
-    public_cutoff_date?: string;
+    public_cutoff_date?: string | null;
   };
 }
 

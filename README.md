@@ -142,7 +142,7 @@ const catalog = await client.catalog();
 console.log(catalog);
 
 const markets = await client.catalog({ source: "hyperliquid" });
-console.log(markets.sources[0].markets.map((m) => m.id));
+console.log(markets.markets.map((m) => m.market));
 ```
 
 ### Events & trades (from local snapshots)

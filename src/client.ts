@@ -4,6 +4,7 @@ import { decompress } from "fzstd";
 
 import type {
   AuthMode,
+  CatalogMarket,
   CatalogOptions,
   CatalogResponse,
   DownloadSnapshotOptions,
@@ -112,7 +113,15 @@ export class PolarisClient {
     const params: Record<string, string> = {};
     if (options.source) params.source = options.source;
     if (options.market) params.market = options.market;
-    return this._getJson("/catalog", { params, auth: "if-available" });
+    const payload = await this._getJson<{
+      updatedAt?: string;
+      markets?: unknown;
+      sources?: unknown;
+    }>("/catalog", {
+      params,
+      auth: "if-available",
+    });
+    return normalizeCatalogResponse(payload);
   }
 
   /**
@@ -423,28 +432,26 @@ export class PolarisClient {
   ): Promise<CatalogMarketBounds> {
     const payload = await this.catalog({ source, market });
 
-    for (const catalogSource of payload.sources) {
-      if (catalogSource.id !== source) continue;
-
-      for (const catalogMarket of catalogSource.markets) {
-        if (catalogMarket.id !== market) continue;
-        if (!catalogMarket.start || !catalogMarket.end) {
-          throw new PolarisError(
-            `Catalog entry for '${source}/${market}' did not include valid start/end timestamps`,
-          );
-        }
-
-        const accessStatus = catalogMarket.access?.status?.trim().toLowerCase();
-
-        return {
-          startUs: toEpochUs(catalogMarket.start),
-          endUs: toEpochUs(catalogMarket.end),
-          accessStatus: accessStatus || undefined,
-          publicCutoffUs: endOfPublicCutoffDayUs(
-            catalogMarket.access?.public_cutoff_date,
-          ),
-        };
+    for (const catalogMarket of payload.markets) {
+      if (catalogMarket.source !== source || catalogMarket.market !== market) {
+        continue;
       }
+      if (!catalogMarket.start || !catalogMarket.end) {
+        throw new PolarisError(
+          `Catalog entry for '${source}/${market}' did not include valid start/end timestamps`,
+        );
+      }
+
+      const accessStatus = catalogMarket.access?.status?.trim().toLowerCase();
+
+      return {
+        startUs: toEpochUs(catalogMarket.start),
+        endUs: toEpochUs(catalogMarket.end),
+        accessStatus: accessStatus || undefined,
+        publicCutoffUs: endOfPublicCutoffDayUs(
+          catalogMarket.access?.public_cutoff_date,
+        ),
+      };
     }
 
     throw new NotFoundError(`Catalog did not include dataset '${source}/${market}'`);
@@ -716,6 +723,95 @@ function readEnvApiKey(): string | undefined {
   }
 }
 
+function normalizeCatalogResponse(payload: {
+  updatedAt?: string;
+  markets?: unknown;
+  sources?: unknown;
+}): CatalogResponse {
+  const { updatedAt } = payload;
+  if (typeof updatedAt !== "string" || updatedAt.length === 0) {
+    throw new PolarisError("Catalog response did not include a valid updatedAt timestamp");
+  }
+
+  if (Array.isArray(payload.markets)) {
+    return {
+      updatedAt,
+      markets: payload.markets.map((entry) => normalizeFlatCatalogMarket(entry)),
+    };
+  }
+
+  if (Array.isArray(payload.sources)) {
+    const markets: CatalogMarket[] = [];
+
+    for (const sourceEntry of payload.sources) {
+      if (!isRecord(sourceEntry)) continue;
+      const source = sourceEntry.id;
+      const sourceMarkets = sourceEntry.markets;
+      if (typeof source !== "string" || !Array.isArray(sourceMarkets)) continue;
+
+      for (const marketEntry of sourceMarkets) {
+        if (!isRecord(marketEntry)) continue;
+        markets.push(
+          normalizeFlatCatalogMarket({
+            ...marketEntry,
+            source,
+            market: marketEntry.id,
+          }),
+        );
+      }
+    }
+
+    return { updatedAt, markets };
+  }
+
+  throw new PolarisError("Catalog response did not include a valid markets array");
+}
+
+function normalizeFlatCatalogMarket(entry: unknown): CatalogMarket {
+  if (!isRecord(entry)) {
+    throw new PolarisError("Catalog market entry was not an object");
+  }
+
+  const { source, market } = entry;
+  if (typeof source !== "string" || source.length === 0) {
+    throw new PolarisError("Catalog market entry did not include a valid source");
+  }
+  if (typeof market !== "string" || market.length === 0) {
+    throw new PolarisError("Catalog market entry did not include a valid market");
+  }
+
+  return {
+    source,
+    market,
+    start: typeof entry.start === "string" ? entry.start : undefined,
+    end: typeof entry.end === "string" ? entry.end : undefined,
+    source_type:
+      typeof entry.source_type === "string" ? entry.source_type : undefined,
+    categories: Array.isArray(entry.categories)
+      ? entry.categories.filter((value): value is string => typeof value === "string")
+      : undefined,
+    access: normalizeCatalogAccess(entry.access),
+  };
+}
+
+function normalizeCatalogAccess(entry: unknown): CatalogMarket["access"] | undefined {
+  if (!isRecord(entry) || typeof entry.status !== "string") {
+    return undefined;
+  }
+
+  return {
+    status: entry.status,
+    public_cutoff_date:
+      typeof entry.public_cutoff_date === "string" || entry.public_cutoff_date === null
+        ? entry.public_cutoff_date
+        : undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function buildSnapshotParams(
   options: ListSnapshotsOptions,
 ): Record<string, string> {
@@ -802,7 +898,9 @@ function assertValidRange(
   }
 }
 
-function endOfPublicCutoffDayUs(dateText: string | undefined): number | undefined {
+function endOfPublicCutoffDayUs(
+  dateText: string | null | undefined,
+): number | undefined {
   if (!dateText) return undefined;
 
   const startMs = Date.parse(`${dateText}T00:00:00Z`);

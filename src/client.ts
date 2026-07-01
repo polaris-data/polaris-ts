@@ -44,7 +44,7 @@ import { OhlcvAggregator } from "./aggregator";
 // SDK version – bumped manually during releases
 // ---------------------------------------------------------------------------
 
-const VERSION = "0.2.1";
+const VERSION = "0.2.2";
 
 // ---------------------------------------------------------------------------
 // Internal shorthand

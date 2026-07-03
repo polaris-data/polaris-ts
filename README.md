@@ -62,7 +62,7 @@ console.log(`Fetched ${rows.length} events`);
 
 ## Snapshot-first architecture
 
-Standardised historical data (`events`, `trades`, `ohlcv`, and `replay`) uses a **snapshot-first** approach:
+Standardised historical data (`events`, `trades`, `l2Snapshots`, `bbo`, `ohlcv`, and `replay`) uses a **snapshot-first** approach:
 
 1. Hourly `.jsonl.zst` snapshot files are discovered via `GET /snapshots` and downloaded via `GET /download` on first access.
 2. Subsequent calls for the same date range read from the local cache — no network round-trips.
@@ -116,6 +116,8 @@ new PolarisClient({
 | `replay(opts)` | Stream events from local snapshots as an async iterable |
 | `events(opts)` | Return all standardised events from local snapshots |
 | `trades(opts)` | Return trade events from local snapshots |
+| `l2Snapshots(opts)` | Return standardised orderbook snapshot events from local snapshots |
+| `bbo(opts)` | Derive best bid / offer quotes from local orderbook snapshots |
 | `ohlcv(opts)` | Aggregate OHLCV bars from local snapshots |
 | `ohlcvTradingView(opts)` | TradingView-shaped OHLCV from local snapshots |
 
@@ -168,6 +170,14 @@ const trades = await client.trades({
   to: "2024-01-01T01:00:00Z",
 });
 console.log(trades.length);
+
+const quotes = await client.bbo({
+  source: "binance",
+  market: "BTC-USDT",
+  from: "2024-01-01T00:00:00Z",
+  to: "2024-01-01T01:00:00Z",
+});
+console.log(quotes[0]);
 ```
 
 ### Replay (streaming from local snapshots)

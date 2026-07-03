@@ -60,7 +60,7 @@ export interface CatalogMarket {
 // Standardised event envelope
 // ---------------------------------------------------------------------------
 
-export interface StandardEvent {
+export interface StandardEvent extends Record<string, unknown> {
   timestamp: number;
   source: string;
   market: string;
@@ -78,6 +78,36 @@ export interface TradeData {
 export interface TradeEvent extends StandardEvent {
   type: "trade";
   data: TradeData;
+}
+
+export type OrderbookLevel =
+  | [number | string, number | string, ...unknown[]]
+  | {
+      price: number | string;
+      quantity?: number | string;
+      size?: number | string;
+      amount?: number | string;
+      [key: string]: unknown;
+    };
+
+export interface OrderbookSides {
+  bids: OrderbookLevel[];
+  asks: OrderbookLevel[];
+}
+
+export interface OrderbookData
+  extends Record<string, unknown>, Partial<OrderbookSides> {}
+
+export interface OrderbookEvent extends StandardEvent, Partial<OrderbookSides> {
+  data: OrderbookData;
+}
+
+export interface BboQuote {
+  timestamp: number;
+  bid_price: number;
+  bid_quantity: number;
+  ask_price: number;
+  ask_quantity: number;
 }
 
 // ---------------------------------------------------------------------------

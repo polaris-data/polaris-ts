@@ -4,6 +4,7 @@ import { decompress } from "fzstd";
 
 import type {
   AuthMode,
+  BboQuote,
   CatalogMarket,
   CatalogOptions,
   CatalogResponse,
@@ -14,6 +15,7 @@ import type {
   ListSnapshotsOptions,
   OhlcvBar,
   OhlcvOptions,
+  OrderbookEvent,
   PaginatedResponse,
   PolarisClientOptions,
   RawQueryOptions,
@@ -192,6 +194,50 @@ export class PolarisClient {
     )) {
       result.push(event);
     }
+    return result;
+  }
+
+  /**
+   * Return standardised orderbook snapshot events for a time range.
+   *
+   * Reads from locally-cached standard snapshot files, filtering to rows that
+   * contain both bid and ask orderbook sides.
+   */
+  async l2Snapshots(
+    options: HistoricalQueryOptions,
+  ): Promise<OrderbookEvent[]> {
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const result: OrderbookEvent[] = [];
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      hasOrderbookSides,
+    )) {
+      result.push(event);
+    }
+    return result;
+  }
+
+  /**
+   * Derive best bid / offer quotes from standardised orderbook snapshots.
+   */
+  async bbo(options: HistoricalQueryOptions): Promise<BboQuote[]> {
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const result: BboQuote[] = [];
+
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      hasOrderbookSides,
+    )) {
+      const quote = deriveBbo(event);
+      if (quote) result.push(quote);
+    }
+
     return result;
   }
 
@@ -461,6 +507,20 @@ export class PolarisClient {
    * Core routine: ensure hourly standard snapshots exist in `data/`,
    * decompress them, and yield matching events one at a time.
    */
+  private _readHourlyEvents<T extends Json>(
+    source: string,
+    market: string,
+    fromUs: number,
+    toUs: number,
+    filter: (event: Json) => event is T,
+  ): AsyncGenerator<T>;
+  private _readHourlyEvents(
+    source: string,
+    market: string,
+    fromUs: number,
+    toUs: number,
+    filter?: (event: Json) => boolean,
+  ): AsyncGenerator<Json>;
   private async *_readHourlyEvents(
     source: string,
     market: string,
@@ -810,6 +870,114 @@ function normalizeCatalogAccess(entry: unknown): CatalogMarket["access"] | undef
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function hasOrderbookSides(event: Json): event is OrderbookEvent {
+  return extractOrderbookSides(event) !== undefined;
+}
+
+function coerceNumeric(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function extractOrderbookSides(
+  row: Json,
+): { bids: unknown[]; asks: unknown[] } | undefined {
+  const candidates: unknown[] = [row];
+  if (isRecord(row.data)) {
+    candidates.push(row.data);
+  }
+
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) continue;
+
+    const { bids, asks } = candidate;
+    if (Array.isArray(bids) && Array.isArray(asks)) {
+      return { bids, asks };
+    }
+  }
+
+  return undefined;
+}
+
+function parseOrderbookLevel(level: unknown): [number, number] | undefined {
+  let priceRaw: unknown;
+  let quantityRaw: unknown;
+
+  if (isRecord(level)) {
+    priceRaw = level.price;
+    quantityRaw = level.quantity ?? level.size ?? level.amount;
+  } else if (Array.isArray(level) && level.length >= 2) {
+    [priceRaw, quantityRaw] = level;
+  }
+
+  const price = coerceNumeric(priceRaw);
+  const quantity = coerceNumeric(quantityRaw);
+  if (price === undefined || quantity === undefined) {
+    return undefined;
+  }
+
+  return [price, quantity];
+}
+
+function bestOrderbookLevel(
+  levels: unknown[],
+  side: "bid" | "ask",
+): [number, number] | undefined {
+  let bestPrice: number | undefined;
+  let bestQuantity: number | undefined;
+
+  for (const level of levels) {
+    const parsed = parseOrderbookLevel(level);
+    if (!parsed) continue;
+
+    const [price, quantity] = parsed;
+    if (
+      bestPrice === undefined ||
+      (side === "bid" && price > bestPrice) ||
+      (side === "ask" && price < bestPrice)
+    ) {
+      bestPrice = price;
+      bestQuantity = quantity;
+    }
+  }
+
+  if (bestPrice === undefined || bestQuantity === undefined) {
+    return undefined;
+  }
+
+  return [bestPrice, bestQuantity];
+}
+
+function deriveBbo(row: Json): BboQuote | undefined {
+  const timestamp = row.timestamp;
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
+    return undefined;
+  }
+
+  const sides = extractOrderbookSides(row);
+  if (!sides) return undefined;
+
+  const bid = bestOrderbookLevel(sides.bids, "bid");
+  const ask = bestOrderbookLevel(sides.asks, "ask");
+  if (!bid || !ask) return undefined;
+
+  return {
+    timestamp,
+    bid_price: bid[0],
+    bid_quantity: bid[1],
+    ask_price: ask[0],
+    ask_quantity: ask[1],
+  };
 }
 
 function buildSnapshotParams(

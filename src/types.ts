@@ -60,7 +60,7 @@ export interface CatalogMarket {
 // Standardised event envelope
 // ---------------------------------------------------------------------------
 
-export interface StandardEvent {
+export interface StandardEvent extends Record<string, unknown> {
   timestamp: number;
   source: string;
   market: string;
@@ -80,8 +80,84 @@ export interface TradeEvent extends StandardEvent {
   data: TradeData;
 }
 
+export interface PointSeriesData extends Record<string, unknown> {
+  series: string;
+}
+
+export interface PointSeriesEvent extends StandardEvent {
+  type: "point";
+  data: PointSeriesData;
+}
+
+export interface FundingRateData extends PointSeriesData {
+  series: "funding_rate";
+}
+
+export interface FundingRateEvent extends PointSeriesEvent {
+  data: FundingRateData;
+}
+
+export interface MarkPriceData extends PointSeriesData {
+  series: "mark_price";
+}
+
+export interface MarkPriceEvent extends PointSeriesEvent {
+  data: MarkPriceData;
+}
+
+export type OrderbookLevel =
+  | [number | string, number | string, ...unknown[]]
+  | {
+      price: number | string;
+      quantity?: number | string;
+      size?: number | string;
+      amount?: number | string;
+      [key: string]: unknown;
+    };
+
+export interface OrderbookSides {
+  bids: OrderbookLevel[];
+  asks: OrderbookLevel[];
+}
+
+export interface OrderbookData
+  extends Record<string, unknown>, Partial<OrderbookSides> {}
+
+export interface OrderbookEvent extends StandardEvent, Partial<OrderbookSides> {
+  data: OrderbookData;
+}
+
+export interface BboQuote {
+  timestamp: number;
+  bid_price: number;
+  bid_quantity: number;
+  ask_price: number;
+  ask_quantity: number;
+}
+
+export interface DepthMetricsRow {
+  timestamp: number;
+  bid_price: number;
+  ask_price: number;
+  mid_price: number;
+  bid_ask_spread: number;
+  bid_ask_spread_bps: number | null;
+  depth_pct: number;
+  bid_depth_notional: number;
+  ask_depth_notional: number;
+  depth_imbalance: number | null;
+  slippage_notional: number;
+  target_base_quantity: number | null;
+  buy_average_price: number | null;
+  sell_average_price: number | null;
+  buy_slippage: number | null;
+  sell_slippage: number | null;
+  buy_slippage_bps: number | null;
+  sell_slippage_bps: number | null;
+}
+
 // ---------------------------------------------------------------------------
-// OHLCV – aggregated locally from trade snapshots
+// Trade-derived aggregates
 // ---------------------------------------------------------------------------
 
 export type OhlcvInterval = "100ms" | "1s" | "10s" | "1m" | "5m" | "15m" | "1h";
@@ -94,6 +170,25 @@ export interface OhlcvBar {
   close: number;
   volume: number;
   trades: number;
+}
+
+export interface VolumeBar {
+  timestamp: number;
+  volume: number;
+}
+
+export interface VwapBar {
+  timestamp: number;
+  vwap: number | null;
+  volume: number;
+  quote_volume: number;
+  trades: number;
+}
+
+export interface VolatilityBar {
+  timestamp: number;
+  volatility: number;
+  returns: number;
 }
 
 export interface TradingViewCandle {
@@ -213,6 +308,24 @@ export interface RawQueryOptions {
 
 export interface OhlcvOptions extends HistoricalQueryOptions {
   interval: OhlcvInterval;
+}
+
+export interface VolumeOptions extends HistoricalQueryOptions {
+  interval: OhlcvInterval;
+}
+
+export interface VwapOptions extends HistoricalQueryOptions {
+  interval: OhlcvInterval;
+}
+
+export interface VolatilityOptions extends HistoricalQueryOptions {
+  interval: OhlcvInterval;
+  method?: "log_returns";
+}
+
+export interface DepthMetricsOptions extends HistoricalQueryOptions {
+  depthPct?: number;
+  slippageNotional?: number;
 }
 
 export interface ReplayOptions {

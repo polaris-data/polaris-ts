@@ -4,22 +4,34 @@ import { decompress } from "fzstd";
 
 import type {
   AuthMode,
+  BboQuote,
   CatalogMarket,
   CatalogOptions,
   CatalogResponse,
+  DepthMetricsOptions,
+  DepthMetricsRow,
   DownloadSnapshotOptions,
   DownloadUrlResponse,
   FetchLike,
+  FundingRateEvent,
   HistoricalQueryOptions,
   ListSnapshotsOptions,
+  MarkPriceEvent,
   OhlcvBar,
   OhlcvOptions,
+  OrderbookEvent,
   PaginatedResponse,
   PolarisClientOptions,
   RawQueryOptions,
   ReplayOptions,
   SnapshotEntry,
   TradingViewOhlcvResponse,
+  VolumeBar,
+  VolumeOptions,
+  VolatilityBar,
+  VolatilityOptions,
+  VwapBar,
+  VwapOptions,
 } from "./types";
 
 import {
@@ -192,6 +204,189 @@ export class PolarisClient {
     )) {
       result.push(event);
     }
+    return result;
+  }
+
+  /**
+   * Return standardised orderbook snapshot events for a time range.
+   *
+   * Reads from locally-cached standard snapshot files, filtering to rows that
+   * contain both bid and ask orderbook sides.
+   */
+  async l2Snapshots(
+    options: HistoricalQueryOptions,
+  ): Promise<OrderbookEvent[]> {
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const result: OrderbookEvent[] = [];
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      hasOrderbookSides,
+    )) {
+      result.push(event);
+    }
+    return result;
+  }
+
+  /**
+   * Derive best bid / offer quotes from standardised orderbook snapshots.
+   */
+  async bbo(options: HistoricalQueryOptions): Promise<BboQuote[]> {
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const result: BboQuote[] = [];
+
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      hasOrderbookSides,
+    )) {
+      const quote = deriveBbo(event);
+      if (quote) result.push(quote);
+    }
+
+    return result;
+  }
+
+  /**
+   * Return standardised funding-rate point-series events for a time range.
+   */
+  async fundingRates(
+    options: HistoricalQueryOptions,
+  ): Promise<FundingRateEvent[]> {
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const result: FundingRateEvent[] = [];
+
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      isFundingRateEvent,
+    )) {
+      result.push(event);
+    }
+
+    return result;
+  }
+
+  /**
+   * Return standardised mark-price point-series events for a time range.
+   */
+  async markPrices(
+    options: HistoricalQueryOptions,
+  ): Promise<MarkPriceEvent[]> {
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const result: MarkPriceEvent[] = [];
+
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      isMarkPriceEvent,
+    )) {
+      result.push(event);
+    }
+
+    return result;
+  }
+
+  /**
+   * Aggregate per-bucket trade volume from standardised trade data.
+   */
+  async volume(options: VolumeOptions): Promise<VolumeBar[]> {
+    const bars = await this.ohlcv(options);
+    return bars.map((bar) => ({
+      timestamp: bar.timestamp,
+      volume: bar.volume,
+    }));
+  }
+
+  /**
+   * Aggregate per-bucket VWAP from standardised trade data.
+   */
+  async vwap(options: VwapOptions): Promise<VwapBar[]> {
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const agg = new VwapAggregator(options.interval);
+
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      (e) => e.type === "trade",
+    )) {
+      const data = event.data as { price: unknown; quantity: unknown };
+      const price = coerceNumeric(data.price);
+      const quantity = coerceNumeric(data.quantity);
+      if (price === undefined || quantity === undefined) continue;
+      agg.add(event.timestamp as number, price, quantity);
+    }
+
+    return agg.finish();
+  }
+
+  /**
+   * Aggregate realised volatility from standardised trade data.
+   */
+  async volatility(options: VolatilityOptions): Promise<VolatilityBar[]> {
+    if (options.method !== undefined && options.method !== "log_returns") {
+      throw new PolarisError("method must be 'log_returns'");
+    }
+
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const agg = new VolatilityAggregator(options.interval);
+
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      (e) => e.type === "trade",
+    )) {
+      const data = event.data as { price: unknown };
+      const price = coerceNumeric(data.price);
+      if (price === undefined) continue;
+      agg.add(event.timestamp as number, price);
+    }
+
+    return agg.finish();
+  }
+
+  /**
+   * Derive spread, depth, imbalance, and slippage metrics from orderbooks.
+   */
+  async depthMetrics(
+    options: DepthMetricsOptions,
+  ): Promise<DepthMetricsRow[]> {
+    const depthPct = options.depthPct ?? 0.01;
+    const slippageNotional = options.slippageNotional ?? 10_000;
+
+    if (depthPct <= 0) {
+      throw new PolarisError("depthPct must be greater than 0");
+    }
+    if (slippageNotional <= 0) {
+      throw new PolarisError("slippageNotional must be greater than 0");
+    }
+
+    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const result: DepthMetricsRow[] = [];
+
+    for await (const event of this._readHourlyEvents(
+      options.source,
+      options.market,
+      fromUs,
+      toUs,
+      hasOrderbookSides,
+    )) {
+      const row = deriveDepthMetrics(event, depthPct, slippageNotional);
+      if (row) result.push(row);
+    }
+
     return result;
   }
 
@@ -461,6 +656,20 @@ export class PolarisClient {
    * Core routine: ensure hourly standard snapshots exist in `data/`,
    * decompress them, and yield matching events one at a time.
    */
+  private _readHourlyEvents<T extends Json>(
+    source: string,
+    market: string,
+    fromUs: number,
+    toUs: number,
+    filter: (event: Json) => event is T,
+  ): AsyncGenerator<T>;
+  private _readHourlyEvents(
+    source: string,
+    market: string,
+    fromUs: number,
+    toUs: number,
+    filter?: (event: Json) => boolean,
+  ): AsyncGenerator<Json>;
   private async *_readHourlyEvents(
     source: string,
     market: string,
@@ -715,6 +924,120 @@ export class PolarisClient {
 // Module-level helpers (not exported)
 // ===========================================================================
 
+class VwapAggregator {
+  private readonly _intervalUs: number;
+  private readonly _rows = new Map<
+    number,
+    { timestamp: number; volume: number; quoteVolume: number; trades: number }
+  >();
+
+  constructor(interval: string) {
+    this._intervalUs = intervalToUs(interval);
+  }
+
+  add(timestamp: number, price: number, quantity: number): void {
+    if (!Number.isFinite(timestamp) || quantity <= 0) return;
+
+    const bucket =
+      Math.floor(timestamp / this._intervalUs) * this._intervalUs;
+    const row = this._rows.get(bucket);
+
+    if (!row) {
+      this._rows.set(bucket, {
+        timestamp: bucket,
+        volume: quantity,
+        quoteVolume: price * quantity,
+        trades: 1,
+      });
+      return;
+    }
+
+    row.volume += quantity;
+    row.quoteVolume += price * quantity;
+    row.trades += 1;
+  }
+
+  finish(): VwapBar[] {
+    return Array.from(this._rows.values())
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .map((row) => ({
+        timestamp: row.timestamp,
+        vwap: row.volume > 0 ? row.quoteVolume / row.volume : null,
+        volume: row.volume,
+        quote_volume: row.quoteVolume,
+        trades: row.trades,
+      }));
+  }
+}
+
+class VolatilityAggregator {
+  private readonly _intervalUs: number;
+  private readonly _points: Array<[timestamp: number, price: number]> = [];
+
+  constructor(interval: string) {
+    this._intervalUs = intervalToUs(interval);
+  }
+
+  add(timestamp: number, price: number): void {
+    if (!Number.isFinite(timestamp) || price <= 0) return;
+    this._points.push([timestamp, price]);
+  }
+
+  finish(): VolatilityBar[] {
+    const points = this._points.slice().sort((a, b) => a[0] - b[0]);
+    const buckets = new Map<
+      number,
+      {
+        timestamp: number;
+        returns: number;
+        mean: number;
+        m2: number;
+        lastPrice: number | undefined;
+      }
+    >();
+
+    for (const [timestamp, price] of points) {
+      const bucket =
+        Math.floor(timestamp / this._intervalUs) * this._intervalUs;
+
+      let state = buckets.get(bucket);
+      if (!state) {
+        state = {
+          timestamp: bucket,
+          returns: 0,
+          mean: 0,
+          m2: 0,
+          lastPrice: undefined,
+        };
+        buckets.set(bucket, state);
+      }
+
+      if (state.lastPrice !== undefined) {
+        const logReturn = Math.log(price / state.lastPrice);
+        state.returns += 1;
+        const delta = logReturn - state.mean;
+        state.mean += delta / state.returns;
+        const delta2 = logReturn - state.mean;
+        state.m2 += delta * delta2;
+      }
+
+      state.lastPrice = price;
+    }
+
+    return Array.from(buckets.values())
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .flatMap((state) => {
+        if (state.returns < 2) return [];
+        const variance = state.m2 / (state.returns - 1);
+        return [{
+          timestamp: state.timestamp,
+          volatility: Math.sqrt(variance),
+          returns: state.returns,
+        }];
+      });
+  }
+}
+
 function readEnvApiKey(): string | undefined {
   try {
     return process?.env?.POLARIS_API_KEY;
@@ -810,6 +1133,303 @@ function normalizeCatalogAccess(entry: unknown): CatalogMarket["access"] | undef
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function intervalToUs(interval: string): number {
+  const match = interval.match(/^(\d+)(ms|s|m|h)$/);
+  if (!match) {
+    throw new PolarisError(`Invalid interval: ${interval}`);
+  }
+
+  const amount = Number.parseInt(match[1], 10);
+  switch (match[2]) {
+    case "ms":
+      return amount * 1_000;
+    case "s":
+      return amount * 1_000_000;
+    case "m":
+      return amount * 60_000_000;
+    case "h":
+      return amount * 3_600_000_000;
+    default:
+      throw new PolarisError(`Invalid interval: ${interval}`);
+  }
+}
+
+function pointSeriesName(event: Json): string | undefined {
+  if (event.type !== "point" || !isRecord(event.data)) {
+    return undefined;
+  }
+  return typeof event.data.series === "string" ? event.data.series : undefined;
+}
+
+function isFundingRateEvent(event: Json): event is FundingRateEvent {
+  return pointSeriesName(event) === "funding_rate";
+}
+
+function isMarkPriceEvent(event: Json): event is MarkPriceEvent {
+  return pointSeriesName(event) === "mark_price";
+}
+
+function hasOrderbookSides(event: Json): event is OrderbookEvent {
+  return extractOrderbookSides(event) !== undefined;
+}
+
+function coerceNumeric(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function extractOrderbookSides(
+  row: Json,
+): { bids: unknown[]; asks: unknown[] } | undefined {
+  const candidates: unknown[] = [row];
+  if (isRecord(row.data)) {
+    candidates.push(row.data);
+  }
+
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) continue;
+
+    const { bids, asks } = candidate;
+    if (Array.isArray(bids) && Array.isArray(asks)) {
+      return { bids, asks };
+    }
+  }
+
+  return undefined;
+}
+
+function parseOrderbookLevel(level: unknown): [number, number] | undefined {
+  let priceRaw: unknown;
+  let quantityRaw: unknown;
+
+  if (isRecord(level)) {
+    priceRaw = level.price;
+    quantityRaw = level.quantity ?? level.size ?? level.amount;
+  } else if (Array.isArray(level) && level.length >= 2) {
+    [priceRaw, quantityRaw] = level;
+  }
+
+  const price = coerceNumeric(priceRaw);
+  const quantity = coerceNumeric(quantityRaw);
+  if (price === undefined || quantity === undefined) {
+    return undefined;
+  }
+
+  return [price, quantity];
+}
+
+function bestOrderbookLevel(
+  levels: unknown[],
+  side: "bid" | "ask",
+): [number, number] | undefined {
+  let bestPrice: number | undefined;
+  let bestQuantity: number | undefined;
+
+  for (const level of levels) {
+    const parsed = parseOrderbookLevel(level);
+    if (!parsed) continue;
+
+    const [price, quantity] = parsed;
+    if (
+      bestPrice === undefined ||
+      (side === "bid" && price > bestPrice) ||
+      (side === "ask" && price < bestPrice)
+    ) {
+      bestPrice = price;
+      bestQuantity = quantity;
+    }
+  }
+
+  if (bestPrice === undefined || bestQuantity === undefined) {
+    return undefined;
+  }
+
+  return [bestPrice, bestQuantity];
+}
+
+function sortedOrderbookLevels(
+  levels: unknown[],
+  side: "bid" | "ask",
+): Array<[number, number]> {
+  const parsed = levels
+    .map((level) => parseOrderbookLevel(level))
+    .filter((level): level is [number, number] => level !== undefined)
+    .filter(([price, quantity]) => price > 0 && quantity > 0);
+
+  parsed.sort((a, b) => (side === "bid" ? b[0] - a[0] : a[0] - b[0]));
+  return parsed;
+}
+
+function deriveBbo(row: Json): BboQuote | undefined {
+  const timestamp = row.timestamp;
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
+    return undefined;
+  }
+
+  const sides = extractOrderbookSides(row);
+  if (!sides) return undefined;
+
+  const bid = bestOrderbookLevel(sides.bids, "bid");
+  const ask = bestOrderbookLevel(sides.asks, "ask");
+  if (!bid || !ask) return undefined;
+
+  return {
+    timestamp,
+    bid_price: bid[0],
+    bid_quantity: bid[1],
+    ask_price: ask[0],
+    ask_quantity: ask[1],
+  };
+}
+
+function depthNotionalWithinPct(
+  levels: Array<[number, number]>,
+  side: "bid" | "ask",
+  midPrice: number,
+  depthPct: number,
+): number {
+  if (side === "bid") {
+    const cutoff = midPrice * (1 - depthPct);
+    return levels.reduce(
+      (sum, [price, quantity]) =>
+        price >= cutoff ? sum + price * quantity : sum,
+      0,
+    );
+  }
+
+  const cutoff = midPrice * (1 + depthPct);
+  return levels.reduce(
+    (sum, [price, quantity]) =>
+      price <= cutoff ? sum + price * quantity : sum,
+    0,
+  );
+}
+
+function quoteTotalForBaseQuantity(
+  levels: Array<[number, number]>,
+  targetQuantity: number,
+): number | undefined {
+  let remainingQuantity = targetQuantity;
+  let quoteTotal = 0;
+
+  for (const [price, availableQuantity] of levels) {
+    const fillQuantity = Math.min(availableQuantity, remainingQuantity);
+    quoteTotal += fillQuantity * price;
+    remainingQuantity -= fillQuantity;
+    if (remainingQuantity <= 1e-12) {
+      return quoteTotal;
+    }
+  }
+
+  return undefined;
+}
+
+function deriveDepthMetrics(
+  row: Json,
+  depthPct: number,
+  slippageNotional: number,
+): DepthMetricsRow | undefined {
+  const timestamp = row.timestamp;
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
+    return undefined;
+  }
+
+  const sides = extractOrderbookSides(row);
+  if (!sides) return undefined;
+
+  const bids = sortedOrderbookLevels(sides.bids, "bid");
+  const asks = sortedOrderbookLevels(sides.asks, "ask");
+  if (bids.length === 0 || asks.length === 0) {
+    return undefined;
+  }
+
+  const [bidPrice] = bids[0];
+  const [askPrice] = asks[0];
+  if (askPrice < bidPrice) {
+    return undefined;
+  }
+
+  const midPrice = (bidPrice + askPrice) / 2;
+  const spread = askPrice - bidPrice;
+  const spreadBps = midPrice > 0 ? (spread / midPrice) * 10_000 : null;
+
+  const bidDepthNotional = depthNotionalWithinPct(
+    bids,
+    "bid",
+    midPrice,
+    depthPct,
+  );
+  const askDepthNotional = depthNotionalWithinPct(
+    asks,
+    "ask",
+    midPrice,
+    depthPct,
+  );
+  const totalDepthNotional = bidDepthNotional + askDepthNotional;
+  const depthImbalance =
+    totalDepthNotional > 0
+      ? (bidDepthNotional - askDepthNotional) / totalDepthNotional
+      : null;
+
+  const targetBaseQuantity =
+    midPrice > 0 ? slippageNotional / midPrice : null;
+
+  let buyAveragePrice: number | null = null;
+  let sellAveragePrice: number | null = null;
+  let buySlippage: number | null = null;
+  let sellSlippage: number | null = null;
+  let buySlippageBps: number | null = null;
+  let sellSlippageBps: number | null = null;
+
+  if (targetBaseQuantity !== null && targetBaseQuantity > 0) {
+    const buyQuoteTotal = quoteTotalForBaseQuantity(asks, targetBaseQuantity);
+    const sellQuoteTotal = quoteTotalForBaseQuantity(bids, targetBaseQuantity);
+
+    if (buyQuoteTotal !== undefined) {
+      buyAveragePrice = buyQuoteTotal / targetBaseQuantity;
+      buySlippage = buyQuoteTotal - slippageNotional;
+      buySlippageBps =
+        ((buyAveragePrice - midPrice) / midPrice) * 10_000;
+    }
+
+    if (sellQuoteTotal !== undefined) {
+      sellAveragePrice = sellQuoteTotal / targetBaseQuantity;
+      sellSlippage = slippageNotional - sellQuoteTotal;
+      sellSlippageBps =
+        ((midPrice - sellAveragePrice) / midPrice) * 10_000;
+    }
+  }
+
+  return {
+    timestamp: Math.trunc(timestamp),
+    bid_price: bidPrice,
+    ask_price: askPrice,
+    mid_price: midPrice,
+    bid_ask_spread: spread,
+    bid_ask_spread_bps: spreadBps,
+    depth_pct: depthPct,
+    bid_depth_notional: bidDepthNotional,
+    ask_depth_notional: askDepthNotional,
+    depth_imbalance: depthImbalance,
+    slippage_notional: slippageNotional,
+    target_base_quantity: targetBaseQuantity,
+    buy_average_price: buyAveragePrice,
+    sell_average_price: sellAveragePrice,
+    buy_slippage: buySlippage,
+    sell_slippage: sellSlippage,
+    buy_slippage_bps: buySlippageBps,
+    sell_slippage_bps: sellSlippageBps,
+  };
 }
 
 function buildSnapshotParams(

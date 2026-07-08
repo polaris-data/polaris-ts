@@ -60,35 +60,6 @@ const rows = await client.events({
 console.log(`Fetched ${rows.length} events`);
 ```
 
-## Snapshot-first architecture
-
-Standardised historical data (`events`, `trades`, `l2Snapshots`, `fundingRates`, `markPrices`, `bbo`, `depthMetrics`, `ohlcv`, `volume`, `vwap`, `volatility`, and `replay`) uses a **snapshot-first** approach:
-
-1. Hourly `.jsonl.zst` snapshot files are discovered via `GET /snapshots` and downloaded via `GET /download` on first access.
-2. Subsequent calls for the same date range read from the local cache — no network round-trips.
-3. If a requested hour has no available snapshot, the SDK raises a `PolarisError` rather than silently falling back.
-
-### Local dataset root
-
-The default root follows the platform convention so the CLI and SDK share the same files:
-
-| Platform | Default root |
-| --- | --- |
-| macOS | `~/Library/Application Support/polaris` |
-| Linux | `$XDG_DATA_HOME/polaris` or `~/.local/share/polaris` |
-| Windows | `%APPDATA%\polaris` |
-
-Inside the root:
-
-```
-<root>/
-  data/       # Rust-style snapshots: <tier>/<source>/<market>/<date>/<opaque-key>.jsonl.zst
-  tmp/        # Temporary download parts
-  cache/
-```
-
-Override with the `datasetRoot` constructor option or the `POLARIS_ROOT` environment variable.
-
 ## `PolarisClient`
 
 ```ts
@@ -101,41 +72,44 @@ new PolarisClient({
 });
 ```
 
+Use it to inspect available data and query historical market data.
+
 ### Discovery
 
-| Method | Description |
-| --- | --- |
-| `health()` | Check API availability |
-| `catalog(opts?)` | Browse supported sources and markets |
-| `listSnapshots(opts)` | List available snapshot files for a time range |
+| Method | Returns | Use case |
+| --- | --- | --- |
+| `health()` | API health/status payload | Connectivity checks and startup validation |
+| `catalog(opts?)` | Source/market metadata | Discover supported datasets, markets, and time coverage |
+| `listSnapshots(opts)` | List of snapshot file entries | Inspect snapshot availability before downloading or replaying |
 
-### Historical data (snapshot-first)
+### Access patterns
 
-| Method | Description |
-| --- | --- |
-| `replay(opts)` | Stream events from local snapshots as an async iterable |
-| `events(opts)` | Return all standardised events from local snapshots |
-| `trades(opts)` | Return trade events from local snapshots |
-| `l2Snapshots(opts)` | Return standardised orderbook snapshot events from local snapshots |
-| `fundingRates(opts)` | Return funding-rate point-series events from local snapshots |
-| `markPrices(opts)` | Return mark-price point-series events from local snapshots |
-| `bbo(opts)` | Derive best bid / offer quotes from local orderbook snapshots |
-| `depthMetrics(opts)` | Derive spread, depth, imbalance, and slippage metrics from orderbooks |
-| `ohlcv(opts)` | Aggregate OHLCV bars from local snapshots |
-| `volume(opts)` | Aggregate trade volume bars from local snapshots |
-| `vwap(opts)` | Aggregate VWAP bars from local snapshots |
-| `volatility(opts)` | Aggregate realised volatility from local snapshots |
-| `ohlcvTradingView(opts)` | TradingView-shaped OHLCV from local snapshots |
+| Method | Returns | Use case |
+| --- | --- | --- |
+| `replay(opts)` | Async iterator of historical events | Backfills and replay-style processing without materializing everything up front |
+| `raw(opts)` | Throws `PolarisError` in the TypeScript SDK | Reserved for parity with other SDKs; TypeScript historical access remains snapshot-first |
+| `downloadSnapshot(opts)` | Native `Response` for a snapshot artifact | Manual snapshot download and custom file handling |
+| `getSnapshotDownloadUrl(opts)` | Resolved pre-signed snapshot URL | External download workflows or passing snapshot URLs to other systems |
+
+### Standardized Data Schemas
+
+| Method | Returns | Use case |
+| --- | --- | --- |
+| `events(opts)` | Array of standardised historical events | General-purpose historical analysis when you want the normalized event stream in memory |
+| `trades(opts)` | Array of standardised trade events | Trade-level analytics, execution studies, and derived bar calculations |
+| `l2Snapshots(opts)` | Array of standardised orderbook snapshot rows | Order book reconstruction and microstructure analysis |
+| `fundingRates(opts)` | Array of funding-rate point series rows | Perpetual funding studies and carry modeling |
+| `markPrices(opts)` | Array of mark-price point series rows | Basis analysis, mark tracking, and liquidation-related research |
+| `ohlcv(opts)` | Aggregated OHLCV bars | Charting, bar-based strategies, and downstream TA workflows |
+| `ohlcvTradingView(opts)` | TradingView-shaped OHLCV payload | Feeding TradingView-compatible chart consumers directly |
+| `volume(opts)` | Bucketed trade volume series | Volume profiling and participation analysis |
+| `vwap(opts)` | Bucketed VWAP series | Execution benchmarking and price smoothing |
+| `volatility(opts)` | Bucketed realized volatility series | Risk modeling and intraperiod volatility analysis |
+| `bbo(opts)` | Best bid/offer quote series | Spread tracking, quote analytics, and top-of-book monitoring |
+| `depthMetrics(opts)` | Derived depth, spread, imbalance, and slippage metrics | Liquidity analysis and market impact estimation |
 
 All snapshot-based methods accept `from` and `to` as ISO 8601 strings, `Date`, or epoch microseconds. If one or both bounds are omitted, the client infers a bounded range from catalog metadata.
 `replay({ standard: false })` is not supported in the TypeScript SDK.
-
-### Downloads
-
-| Method | Description |
-| --- | --- |
-| `downloadSnapshot(opts)` | Download a snapshot file from `GET /download` (returns native `Response`) |
-| `getSnapshotDownloadUrl(opts)` | Get the resolved download URL for a snapshot |
 
 ## Examples
 
@@ -391,6 +365,35 @@ import type {
   CatalogMarket,
 } from "polaris-data";
 ```
+
+## Snapshot-first architecture
+
+Standardised historical data (`events`, `trades`, `l2Snapshots`, `fundingRates`, `markPrices`, `bbo`, `depthMetrics`, `ohlcv`, `volume`, `vwap`, `volatility`, and `replay`) uses a **snapshot-first** approach:
+
+1. Hourly `.jsonl.zst` snapshot files are discovered via `GET /snapshots` and downloaded via `GET /download` on first access.
+2. Subsequent calls for the same date range read from the local cache — no network round-trips.
+3. If a requested hour has no available snapshot, the SDK raises a `PolarisError` rather than silently falling back.
+
+### Local dataset root
+
+The default root follows the platform convention so the CLI and SDK share the same files:
+
+| Platform | Default root |
+| --- | --- |
+| macOS | `~/Library/Application Support/polaris` |
+| Linux | `$XDG_DATA_HOME/polaris` or `~/.local/share/polaris` |
+| Windows | `%APPDATA%\polaris` |
+
+Inside the root:
+
+```text
+<root>/
+  data/       # Rust-style snapshots: <tier>/<source>/<market>/<date>/<opaque-key>.jsonl.zst
+  tmp/        # Temporary download parts
+  cache/
+```
+
+Override with the `datasetRoot` constructor option or the `POLARIS_ROOT` environment variable.
 
 ## Runtime dependencies
 

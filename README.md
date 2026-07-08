@@ -62,7 +62,7 @@ console.log(`Fetched ${rows.length} events`);
 
 ## Snapshot-first architecture
 
-Standardised historical data (`events`, `trades`, `l2Snapshots`, `bbo`, `ohlcv`, and `replay`) uses a **snapshot-first** approach:
+Standardised historical data (`events`, `trades`, `l2Snapshots`, `fundingRates`, `markPrices`, `bbo`, `depthMetrics`, `ohlcv`, `volume`, `vwap`, `volatility`, and `replay`) uses a **snapshot-first** approach:
 
 1. Hourly `.jsonl.zst` snapshot files are discovered via `GET /snapshots` and downloaded via `GET /download` on first access.
 2. Subsequent calls for the same date range read from the local cache — no network round-trips.
@@ -117,11 +117,17 @@ new PolarisClient({
 | `events(opts)` | Return all standardised events from local snapshots |
 | `trades(opts)` | Return trade events from local snapshots |
 | `l2Snapshots(opts)` | Return standardised orderbook snapshot events from local snapshots |
+| `fundingRates(opts)` | Return funding-rate point-series events from local snapshots |
+| `markPrices(opts)` | Return mark-price point-series events from local snapshots |
 | `bbo(opts)` | Derive best bid / offer quotes from local orderbook snapshots |
+| `depthMetrics(opts)` | Derive spread, depth, imbalance, and slippage metrics from orderbooks |
 | `ohlcv(opts)` | Aggregate OHLCV bars from local snapshots |
+| `volume(opts)` | Aggregate trade volume bars from local snapshots |
+| `vwap(opts)` | Aggregate VWAP bars from local snapshots |
+| `volatility(opts)` | Aggregate realised volatility from local snapshots |
 | `ohlcvTradingView(opts)` | TradingView-shaped OHLCV from local snapshots |
 
-All snapshot-based methods require `from` and `to` (ISO 8601 strings, `Date`, or epoch microseconds).
+All snapshot-based methods accept `from` and `to` as ISO 8601 strings, `Date`, or epoch microseconds. If one or both bounds are omitted, the client infers a bounded range from catalog metadata.
 `replay({ standard: false })` is not supported in the TypeScript SDK.
 
 ### Downloads
@@ -178,6 +184,38 @@ const quotes = await client.bbo({
   to: "2024-01-01T01:00:00Z",
 });
 console.log(quotes[0]);
+
+const depth = await client.depthMetrics({
+  source: "binance",
+  market: "BTC-USDT",
+  from: "2024-01-01T00:00:00Z",
+  to: "2024-01-01T01:00:00Z",
+});
+console.log(depth[0]);
+```
+
+### Point-series schemas (from local snapshots)
+
+```ts
+import { PolarisClient } from "polaris-data";
+
+const client = new PolarisClient({ apiKey: "polaris_key_your_key" });
+
+const funding = await client.fundingRates({
+  source: "hyperliquid",
+  market: "BTC",
+  from: "2024-01-01T00:00:00Z",
+  to: "2024-01-02T00:00:00Z",
+});
+
+const marks = await client.markPrices({
+  source: "hyperliquid",
+  market: "BTC",
+  from: "2024-01-01T00:00:00Z",
+  to: "2024-01-02T00:00:00Z",
+});
+
+console.log(funding.length, marks.length);
 ```
 
 ### Replay (streaming from local snapshots)
@@ -226,6 +264,40 @@ const tv = await client.ohlcvTradingView({
 ```
 
 Supported intervals: `100ms`, `1s`, `10s`, `1m`, `5m`, `15m`, `1h`.
+
+### Volume, VWAP, and volatility
+
+```ts
+import { PolarisClient } from "polaris-data";
+
+const client = new PolarisClient({ apiKey: "polaris_key_your_key" });
+
+const volume = await client.volume({
+  source: "hyperliquid",
+  market: "BTC",
+  from: "2024-01-01T00:00:00Z",
+  to: "2024-01-02T00:00:00Z",
+  interval: "1m",
+});
+
+const vwap = await client.vwap({
+  source: "hyperliquid",
+  market: "BTC",
+  from: "2024-01-01T00:00:00Z",
+  to: "2024-01-02T00:00:00Z",
+  interval: "1m",
+});
+
+const volatility = await client.volatility({
+  source: "hyperliquid",
+  market: "BTC",
+  from: "2024-01-01T00:00:00Z",
+  to: "2024-01-02T00:00:00Z",
+  interval: "1m",
+});
+
+console.log(volume[0], vwap[0], volatility[0]);
+```
 
 ### Snapshots
 

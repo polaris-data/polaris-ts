@@ -2,7 +2,7 @@
 // Time
 // ---------------------------------------------------------------------------
 
-/** Accepts ISO 8601 strings, `Date` instances, or Unix epoch microseconds. */
+/** Accepts ISO 8601 strings, `Date` instances, or Unix epoch milliseconds. */
 export type TimeInput = string | Date | number;
 
 // ---------------------------------------------------------------------------

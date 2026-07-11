@@ -10,32 +10,31 @@ const EPOCH_RE = /^\d+$/;
  * Convert a {@link TimeInput} value to an ISO 8601 UTC string with a `Z` suffix.
  *
  * - `string` → returned as-is (assumed ISO 8601), unless it looks like an
- *   epoch microsecond integer (13+ digits) in which case it is converted.
+ *   epoch millisecond integer (13+ digits) in which case it is converted.
  * - `Date`   → converted via `toISOString()`.
- * - `number` → treated as **epoch microseconds** when `> 1e12`,
- *   otherwise as **milliseconds**.
+ * - `number` → treated as **epoch milliseconds**.
  */
 export function toIso8601(value: TimeInput): string {
   if (typeof value === "string") {
-    if (EPOCH_RE.test(value) && value.length >= 13) return epochUsToIso(Number(value));
+    if (EPOCH_RE.test(value) && value.length >= 13) return epochMsToIso(Number(value));
     return value;
   }
   if (value instanceof Date) return dateToIso(value);
-  return value > 1e12 ? epochUsToIso(value) : epochMsToIso(value);
+  return epochMsToIso(value);
 }
 
 // ---------------------------------------------------------------------------
-// toEpochUs
+// toEpochMs
 // ---------------------------------------------------------------------------
 
-/** Convert a {@link TimeInput} to **epoch microseconds** (integer). */
-export function toEpochUs(value: TimeInput): number {
-  if (typeof value === "number") return value > 1e12 ? value : value * 1000;
+/** Convert a {@link TimeInput} to **epoch milliseconds** (integer). */
+export function toEpochMs(value: TimeInput): number {
+  if (typeof value === "number") return value;
   if (typeof value === "string") {
     if (EPOCH_RE.test(value) && value.length >= 13) return Number(value);
-    return Math.round(new Date(value).getTime() * 1000);
+    return new Date(value).getTime();
   }
-  return Math.round(value.getTime() * 1000);
+  return value.getTime();
 }
 
 // ---------------------------------------------------------------------------
@@ -44,13 +43,13 @@ export function toEpochUs(value: TimeInput): number {
 
 /**
  * Return an array of `"YYYY-MM-DD"` strings covering every UTC calendar date
- * that intersects `[fromUs, toUs)` (epoch microseconds, inclusive start /
+ * that intersects `[fromMs, toMs)` (epoch milliseconds, inclusive start /
  * exclusive end).
  */
-export function datesInRange(fromUs: number, toUs: number): string[] {
+export function datesInRange(fromMs: number, toMs: number): string[] {
   const dates: string[] = [];
-  const start = new Date(fromUs / 1000);
-  const end = new Date(toUs / 1000);
+  const start = new Date(fromMs);
+  const end = new Date(toMs);
 
   const cur = new Date(
     Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()),
@@ -72,17 +71,17 @@ export function datesInRange(fromUs: number, toUs: number): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Return UTC hour buckets that intersect `[fromUs, toUs)`.
+ * Return UTC hour buckets that intersect `[fromMs, toMs)`.
  */
 export function hoursInRange(
-  fromUs: number,
-  toUs: number,
+  fromMs: number,
+  toMs: number,
 ): Array<{ date: string; hour: number }> {
-  if (toUs <= fromUs) return [];
+  if (toMs <= fromMs) return [];
 
   const hours: Array<{ date: string; hour: number }> = [];
-  const start = new Date(Math.floor(fromUs / 3_600_000_000) * 3_600_000);
-  const end = new Date(Math.floor((toUs - 1) / 3_600_000_000) * 3_600_000);
+  const start = new Date(Math.floor(fromMs / 3_600_000) * 3_600_000);
+  const end = new Date(Math.floor((toMs - 1) / 3_600_000) * 3_600_000);
 
   const cur = new Date(start);
   while (cur <= end) {
@@ -99,10 +98,6 @@ export function hoursInRange(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-function epochUsToIso(us: number): string {
-  return epochMsToIso(us / 1000);
-}
 
 function epochMsToIso(ms: number): string {
   return new Date(ms).toISOString().replace(/\.000Z$/, "Z");

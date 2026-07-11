@@ -44,7 +44,7 @@ import {
   RateLimitedError,
 } from "./errors";
 
-import { toIso8601, toEpochUs, hoursInRange } from "./utils";
+import { toIso8601, toEpochMs, hoursInRange } from "./utils";
 import {
   resolveRoot,
   ensureLayout,
@@ -76,18 +76,18 @@ interface FetchOptions {
 type RedirectMode = "error" | "follow" | "manual";
 
 interface ResolvedHistoricalRange {
-  fromUs: number;
-  toUs: number;
+  fromMs: number;
+  toMs: number;
 }
 
 interface CatalogMarketBounds {
-  startUs: number;
-  endUs: number;
+  startMs: number;
+  endMs: number;
   accessStatus?: string;
-  publicCutoffUs?: number;
+  publicCutoffMs?: number;
 }
 
-const DEFAULT_INFERRED_LOOKBACK_US = 7 * 24 * 60 * 60 * 1_000_000;
+const DEFAULT_INFERRED_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1_000;
 
 // ===========================================================================
 // PolarisClient
@@ -176,13 +176,13 @@ export class PolarisClient {
    * manifests and downloaded automatically.
    */
   async events(options: HistoricalQueryOptions): Promise<Json[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: Json[] = [];
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
     )) {
       result.push(event);
     }
@@ -196,13 +196,13 @@ export class PolarisClient {
    * `type === "trade"`.
    */
   async trades(options: HistoricalQueryOptions): Promise<Json[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: Json[] = [];
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       (e) => e.type === "trade",
     )) {
       result.push(event);
@@ -219,13 +219,13 @@ export class PolarisClient {
   async l2Snapshots(
     options: HistoricalQueryOptions,
   ): Promise<OrderbookEvent[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: OrderbookEvent[] = [];
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       hasOrderbookSides,
     )) {
       result.push(event);
@@ -237,14 +237,14 @@ export class PolarisClient {
    * Derive best bid / offer quotes from standardised orderbook snapshots.
    */
   async bbo(options: HistoricalQueryOptions): Promise<BboQuote[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: BboQuote[] = [];
 
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       hasOrderbookSides,
     )) {
       const quote = deriveBbo(event);
@@ -260,14 +260,14 @@ export class PolarisClient {
   async fundingRates(
     options: HistoricalQueryOptions,
   ): Promise<FundingRateEvent[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: FundingRateEvent[] = [];
 
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       isFundingRateEvent,
     )) {
       result.push(event);
@@ -282,14 +282,14 @@ export class PolarisClient {
   async markPrices(
     options: HistoricalQueryOptions,
   ): Promise<MarkPriceEvent[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: MarkPriceEvent[] = [];
 
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       isMarkPriceEvent,
     )) {
       result.push(event);
@@ -313,14 +313,14 @@ export class PolarisClient {
    * Aggregate per-bucket VWAP from standardised trade data.
    */
   async vwap(options: VwapOptions): Promise<VwapBar[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const agg = new VwapAggregator(options.interval);
 
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       (e) => e.type === "trade",
     )) {
       const data = event.data as { price: unknown; quantity: unknown };
@@ -341,14 +341,14 @@ export class PolarisClient {
       throw new PolarisError("method must be 'log_returns'");
     }
 
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const agg = new VolatilityAggregator(options.interval);
 
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       (e) => e.type === "trade",
     )) {
       const data = event.data as { price: unknown };
@@ -376,14 +376,14 @@ export class PolarisClient {
       throw new PolarisError("slippageNotional must be greater than 0");
     }
 
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: DepthMetricsRow[] = [];
 
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       hasOrderbookSides,
     )) {
       const row = deriveDepthMetrics(event, depthPct, slippageNotional);
@@ -400,14 +400,14 @@ export class PolarisClient {
    * using the same interval-bucketing strategy as the Python SDK.
    */
   async ohlcv(options: OhlcvOptions): Promise<OhlcvBar[]> {
-    const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+    const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const agg = new OhlcvAggregator(options.interval);
 
     for await (const event of this._readHourlyEvents(
       options.source,
       options.market,
-      fromUs,
-      toUs,
+      fromMs,
+      toMs,
       (e) => e.type === "trade",
     )) {
       const data = event.data as { price: number; quantity: number };
@@ -464,12 +464,12 @@ export class PolarisClient {
    */
   async *replay(options: ReplayOptions): AsyncGenerator<Json> {
     if (options.standard !== false) {
-      const { fromUs, toUs } = await this._resolveHistoricalRange(options);
+      const { fromMs, toMs } = await this._resolveHistoricalRange(options);
       yield* this._readHourlyEvents(
         options.source,
         options.market,
-        fromUs,
-        toUs,
+        fromMs,
+        toMs,
       );
     } else {
       throw new PolarisError(
@@ -598,10 +598,10 @@ export class PolarisClient {
     options: Pick<HistoricalQueryOptions, "source" | "market" | "from" | "to">,
   ): Promise<ResolvedHistoricalRange> {
     if (options.from !== undefined && options.to !== undefined) {
-      const fromUs = toEpochUs(options.from);
-      const toUs = toEpochUs(options.to);
-      assertValidRange(fromUs, toUs);
-      return { fromUs, toUs };
+      const fromMs = toEpochMs(options.from);
+      const toMs = toEpochMs(options.to);
+      assertValidRange(fromMs, toMs);
+      return { fromMs, toMs };
     }
 
     const bounds = await this._catalogMarketBounds(options.source, options.market);
@@ -612,35 +612,35 @@ export class PolarisClient {
       );
     }
 
-    const lowerBoundUs = bounds.startUs;
-    let upperBoundUs = Math.min(bounds.endUs, Date.now() * 1000);
+    const lowerBoundMs = bounds.startMs;
+    let upperBoundMs = Math.min(bounds.endMs, Date.now());
 
-    if (!this._apiKey && bounds.publicCutoffUs !== undefined) {
-      upperBoundUs = Math.min(upperBoundUs, bounds.publicCutoffUs);
+    if (!this._apiKey && bounds.publicCutoffMs !== undefined) {
+      upperBoundMs = Math.min(upperBoundMs, bounds.publicCutoffMs);
     }
 
-    if (lowerBoundUs >= upperBoundUs) {
+    if (lowerBoundMs >= upperBoundMs) {
       throw new PolarisError(
         `Catalog reported no queryable historical range for '${options.source}/${options.market}'`,
       );
     }
 
-    let fromUs: number;
-    let toUs: number;
+    let fromMs: number;
+    let toMs: number;
 
     if (options.from === undefined && options.to === undefined) {
-      toUs = upperBoundUs;
-      fromUs = Math.max(lowerBoundUs, toUs - DEFAULT_INFERRED_LOOKBACK_US);
+      toMs = upperBoundMs;
+      fromMs = Math.max(lowerBoundMs, toMs - DEFAULT_INFERRED_LOOKBACK_MS);
     } else if (options.from === undefined) {
-      toUs = Math.min(toEpochUs(options.to as NonNullable<typeof options.to>), upperBoundUs);
-      fromUs = Math.max(lowerBoundUs, toUs - DEFAULT_INFERRED_LOOKBACK_US);
+      toMs = Math.min(toEpochMs(options.to as NonNullable<typeof options.to>), upperBoundMs);
+      fromMs = Math.max(lowerBoundMs, toMs - DEFAULT_INFERRED_LOOKBACK_MS);
     } else {
-      fromUs = Math.max(toEpochUs(options.from), lowerBoundUs);
-      toUs = Math.min(fromUs + DEFAULT_INFERRED_LOOKBACK_US, upperBoundUs);
+      fromMs = Math.max(toEpochMs(options.from), lowerBoundMs);
+      toMs = Math.min(fromMs + DEFAULT_INFERRED_LOOKBACK_MS, upperBoundMs);
     }
 
-    assertValidRange(fromUs, toUs, "from must resolve to a time before to");
-    return { fromUs, toUs };
+    assertValidRange(fromMs, toMs, "from must resolve to a time before to");
+    return { fromMs, toMs };
   }
 
   private async _catalogMarketBounds(
@@ -662,10 +662,10 @@ export class PolarisClient {
       const accessStatus = catalogMarket.access?.status?.trim().toLowerCase();
 
       return {
-        startUs: toEpochUs(catalogMarket.start),
-        endUs: toEpochUs(catalogMarket.end),
+        startMs: toEpochMs(catalogMarket.start),
+        endMs: toEpochMs(catalogMarket.end),
         accessStatus: accessStatus || undefined,
-        publicCutoffUs: endOfPublicCutoffDayUs(
+        publicCutoffMs: endOfPublicCutoffDayMs(
           catalogMarket.access?.public_cutoff_date,
         ),
       };
@@ -681,26 +681,26 @@ export class PolarisClient {
   private _readHourlyEvents<T extends Json>(
     source: string,
     market: string,
-    fromUs: number,
-    toUs: number,
+    fromMs: number,
+    toMs: number,
     filter: (event: Json) => event is T,
   ): AsyncGenerator<T>;
   private _readHourlyEvents(
     source: string,
     market: string,
-    fromUs: number,
-    toUs: number,
+    fromMs: number,
+    toMs: number,
     filter?: (event: Json) => boolean,
   ): AsyncGenerator<Json>;
   private async *_readHourlyEvents(
     source: string,
     market: string,
-    fromUs: number,
-    toUs: number,
+    fromMs: number,
+    toMs: number,
     filter?: (event: Json) => boolean,
   ): AsyncGenerator<Json> {
     const layout = await this._getLayout();
-    const hours = hoursInRange(fromUs, toUs);
+    const hours = hoursInRange(fromMs, toMs);
     const filePaths = await this._ensureHourlySnapshots(
       source,
       market,
@@ -719,7 +719,7 @@ export class PolarisClient {
         }
 
         const ts = event.timestamp as number;
-        if (ts < fromUs || ts >= toUs) continue;
+        if (ts < fromMs || ts >= toMs) continue;
         if (filter && !filter(event)) continue;
 
         yield event;
@@ -960,21 +960,21 @@ export class PolarisClient {
 // ===========================================================================
 
 class VwapAggregator {
-  private readonly _intervalUs: number;
+  private readonly _intervalMs: number;
   private readonly _rows = new Map<
     number,
     { timestamp: number; volume: number; quoteVolume: number; trades: number }
   >();
 
   constructor(interval: string) {
-    this._intervalUs = intervalToUs(interval);
+    this._intervalMs = intervalToMs(interval);
   }
 
   add(timestamp: number, price: number, quantity: number): void {
     if (!Number.isFinite(timestamp) || quantity <= 0) return;
 
     const bucket =
-      Math.floor(timestamp / this._intervalUs) * this._intervalUs;
+      Math.floor(timestamp / this._intervalMs) * this._intervalMs;
     const row = this._rows.get(bucket);
 
     if (!row) {
@@ -1006,11 +1006,11 @@ class VwapAggregator {
 }
 
 class VolatilityAggregator {
-  private readonly _intervalUs: number;
+  private readonly _intervalMs: number;
   private readonly _points: Array<[timestamp: number, price: number]> = [];
 
   constructor(interval: string) {
-    this._intervalUs = intervalToUs(interval);
+    this._intervalMs = intervalToMs(interval);
   }
 
   add(timestamp: number, price: number): void {
@@ -1033,7 +1033,7 @@ class VolatilityAggregator {
 
     for (const [timestamp, price] of points) {
       const bucket =
-        Math.floor(timestamp / this._intervalUs) * this._intervalUs;
+        Math.floor(timestamp / this._intervalMs) * this._intervalMs;
 
       let state = buckets.get(bucket);
       if (!state) {
@@ -1276,7 +1276,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function intervalToUs(interval: string): number {
+function intervalToMs(interval: string): number {
   const match = interval.match(/^(\d+)(ms|s|m|h)$/);
   if (!match) {
     throw new PolarisError(`Invalid interval: ${interval}`);
@@ -1285,13 +1285,13 @@ function intervalToUs(interval: string): number {
   const amount = Number.parseInt(match[1], 10);
   switch (match[2]) {
     case "ms":
-      return amount * 1_000;
+      return amount;
     case "s":
-      return amount * 1_000_000;
+      return amount * 1_000;
     case "m":
-      return amount * 60_000_000;
+      return amount * 60_000;
     case "h":
-      return amount * 3_600_000_000;
+      return amount * 3_600_000;
     default:
       throw new PolarisError(`Invalid interval: ${interval}`);
   }
@@ -1656,16 +1656,16 @@ function inferFilename(url: string): string | undefined {
 }
 
 function assertValidRange(
-  fromUs: number,
-  toUs: number,
+  fromMs: number,
+  toMs: number,
   message = "from must be before to",
 ): void {
-  if (fromUs >= toUs) {
+  if (fromMs >= toMs) {
     throw new PolarisError(message);
   }
 }
 
-function endOfPublicCutoffDayUs(
+function endOfPublicCutoffDayMs(
   dateText: string | null | undefined,
 ): number | undefined {
   if (!dateText) return undefined;
@@ -1673,5 +1673,5 @@ function endOfPublicCutoffDayUs(
   const startMs = Date.parse(`${dateText}T00:00:00Z`);
   if (Number.isNaN(startMs)) return undefined;
 
-  return (startMs + 24 * 60 * 60 * 1000) * 1000;
+  return startMs + 24 * 60 * 60 * 1000;
 }

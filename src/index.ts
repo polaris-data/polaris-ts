@@ -22,6 +22,7 @@ export type {
   PaginatedResponse,
   CatalogResponse,
   CatalogSource,
+  CatalogInstrument,
   CatalogMarket,
   StandardEvent,
   TradeData,
@@ -49,6 +50,8 @@ export type {
   SnapshotEntry,
   SnapshotsResponse,
   DownloadUrlResponse,
+  SnapshotDownloadEntry,
+  SnapshotDownloadManifest,
   PolarisClientOptions,
   CatalogOptions,
   HistoricalQueryOptions,
@@ -61,4 +64,5 @@ export type {
   ListSnapshotsOptions,
   ReplayOptions,
   DownloadSnapshotOptions,
+  SnapshotDownloadManifestOptions,
 } from "./types";

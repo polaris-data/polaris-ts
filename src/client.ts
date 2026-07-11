@@ -48,6 +48,7 @@ import { toIso8601, toEpochUs, hoursInRange } from "./utils";
 import {
   resolveRoot,
   ensureLayout,
+  dataFilePath,
   standardHourlyDataFilePath,
   fileExists,
   type StorageLayout,
@@ -776,13 +777,9 @@ export class PolarisClient {
 
         await this._downloadSnapshotFromUrl(
           snapshot.url,
-          standardHourlyDataFilePath(
-            layout.dataDir,
-            source,
-            market,
-            snapshot.date,
-            hour,
-          ),
+          // Use the opaque snapshot key from the API so markets like
+          // `AAPL-USD` are preserved exactly in the local cache path.
+          dataFilePath(layout.dataDir, snapshot.key),
         );
         missing.delete(bucket);
       }

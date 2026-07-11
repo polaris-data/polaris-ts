@@ -1,18 +1,18 @@
 import type { OhlcvBar, OhlcvInterval } from "./types";
 
 // ---------------------------------------------------------------------------
-// Interval → microseconds
+// Interval → milliseconds
 // ---------------------------------------------------------------------------
 
-function intervalToUs(interval: OhlcvInterval): number {
+function intervalToMs(interval: OhlcvInterval): number {
   const m = interval.match(/^(\d+)(ms|s|m|h)$/);
   if (!m) throw new Error(`Invalid OHLCV interval: ${interval}`);
   const n = parseInt(m[1], 10);
   switch (m[2]) {
-    case "ms": return n * 1_000;
-    case "s":  return n * 1_000_000;
-    case "m":  return n * 60_000_000;
-    case "h":  return n * 3_600_000_000;
+    case "ms": return n;
+    case "s":  return n * 1_000;
+    case "m":  return n * 60_000;
+    case "h":  return n * 3_600_000;
     default:  throw new Error(`Unreachable`);
   }
 }
@@ -44,17 +44,17 @@ interface _Bucket {
  * precision strategy used by the Python SDK's `_LocalOhlcvAggregator`.
  */
 export class OhlcvAggregator {
-  private readonly _intervalUs: number;
+  private readonly _intervalMs: number;
   private readonly _bars = new Map<number, _Bucket>();
 
   constructor(interval: OhlcvInterval) {
-    this._intervalUs = intervalToUs(interval);
+    this._intervalMs = intervalToMs(interval);
   }
 
   /** Ingest a single trade event. */
   add(timestamp: number, price: number, quantity: number): void {
     const bucketTs =
-      Math.floor(timestamp / this._intervalUs) * this._intervalUs;
+      Math.floor(timestamp / this._intervalMs) * this._intervalMs;
 
     let b = this._bars.get(bucketTs);
     if (!b) {

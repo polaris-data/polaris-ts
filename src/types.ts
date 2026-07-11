@@ -43,6 +43,14 @@ export interface CatalogSource {
   markets: CatalogMarket[];
 }
 
+export interface CatalogInstrument {
+  base: string | null;
+  quote: string | null;
+  tick_size: string | number | null;
+  lot_size: string | number | null;
+  min_notional: string | number | null;
+}
+
 export interface CatalogMarket {
   source: string;
   market: string;
@@ -54,6 +62,7 @@ export interface CatalogMarket {
     status: string;
     public_cutoff_date?: string | null;
   };
+  instrument: CatalogInstrument;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +255,23 @@ export interface DownloadUrlResponse {
   expires_in_seconds?: number;
 }
 
+export interface SnapshotDownloadEntry {
+  date: string;
+  timestamp: string;
+  key: string;
+  url: string;
+  expires_in_seconds: number;
+}
+
+export interface SnapshotDownloadManifest {
+  source: string;
+  market: string;
+  date: string;
+  total: number;
+  total_bytes: number;
+  snapshots: SnapshotDownloadEntry[];
+}
+
 // ---------------------------------------------------------------------------
 // Client constructor options
 // ---------------------------------------------------------------------------
@@ -339,5 +365,11 @@ export interface ReplayOptions {
 
 export interface DownloadSnapshotOptions {
   key: string;
-  mode?: "url" | "json";
+  mode?: "json";
+}
+
+export interface SnapshotDownloadManifestOptions {
+  source: string;
+  market: string;
+  date: string;
 }

@@ -5,6 +5,7 @@ import { decompress } from "fzstd";
 import type {
   AuthMode,
   BboQuote,
+  CatalogInstrument,
   CatalogMarket,
   CatalogOptions,
   CatalogResponse,
@@ -24,6 +25,8 @@ import type {
   PolarisClientOptions,
   RawQueryOptions,
   ReplayOptions,
+  SnapshotDownloadManifest,
+  SnapshotDownloadManifestOptions,
   SnapshotEntry,
   TradingViewOhlcvResponse,
   VolumeBar,
@@ -45,7 +48,6 @@ import { toIso8601, toEpochUs, hoursInRange } from "./utils";
 import {
   resolveRoot,
   ensureLayout,
-  dataFilePath,
   standardHourlyDataFilePath,
   fileExists,
   type StorageLayout,
@@ -169,8 +171,8 @@ export class PolarisClient {
    * Return all standardised historical events for a time range.
    *
    * Reads from locally-cached standard snapshot files in `data/`.
-   * Missing hourly snapshots are discovered via `GET /snapshots` and
-   * downloaded automatically.
+   * Missing hourly snapshots are discovered via daily `GET /download`
+   * manifests and downloaded automatically.
    */
   async events(options: HistoricalQueryOptions): Promise<Json[]> {
     const { fromUs, toUs } = await this._resolveHistoricalRange(options);
@@ -521,6 +523,25 @@ export class PolarisClient {
   }
 
   /**
+   * Get all pre-signed download URLs for a source/market UTC date in one call.
+   */
+  async getSnapshotDownloadUrls(
+    options: SnapshotDownloadManifestOptions,
+  ): Promise<SnapshotDownloadManifest> {
+    const payload = await this._getJson("/download", {
+      params: {
+        source: options.source,
+        market: options.market,
+        date: options.date,
+        mode: "json",
+      },
+      auth: "if-available",
+    });
+
+    return normalizeSnapshotDownloadManifest(payload);
+  }
+
+  /**
    * Get a pre-signed download URL for a snapshot file
    * without fetching the file itself.
    */
@@ -528,7 +549,7 @@ export class PolarisClient {
     options: DownloadSnapshotOptions,
   ): Promise<DownloadUrlResponse> {
     const response = await this._request("/download", {
-      params: { key: options.key, mode: "url" },
+      params: { key: options.key, mode: "json" },
       auth: "if-available",
       redirect: "manual",
       headers: { Accept: "application/json" },
@@ -735,19 +756,36 @@ export class PolarisClient {
 
     if (missing.size === 0) return paths;
 
-    const snapshots = await this.listSnapshots({
-      source,
-      market,
-      from: `${hours[0].date}T${formatHour(hours[0].hour)}:00:00Z`,
-      to: `${hours[hours.length - 1].date}T${formatHour(hours[hours.length - 1].hour)}:59:59Z`,
-    });
+    const dates = Array.from(
+      new Set(Array.from(missing.values(), ({ date }) => date)),
+    ).sort();
 
-    for (const entry of snapshots) {
-      const hour = entry.hour ?? 0;
-      const bucket = hourBucketKey(entry.date, hour);
-      if (!missing.has(bucket)) continue;
-      await this._downloadSnapshot(entry.key, layout);
-      missing.delete(bucket);
+    for (const date of dates) {
+      const manifest = await this.getSnapshotDownloadUrls({
+        source,
+        market,
+        date,
+      });
+
+      for (const snapshot of manifest.snapshots) {
+        const hour = snapshotHour(snapshot.timestamp);
+        if (hour === undefined) continue;
+
+        const bucket = hourBucketKey(snapshot.date, hour);
+        if (!missing.has(bucket)) continue;
+
+        await this._downloadSnapshotFromUrl(
+          snapshot.url,
+          standardHourlyDataFilePath(
+            layout.dataDir,
+            source,
+            market,
+            snapshot.date,
+            hour,
+          ),
+        );
+        missing.delete(bucket);
+      }
     }
 
     if (missing.size > 0) {
@@ -763,26 +801,26 @@ export class PolarisClient {
   /**
    * Download a snapshot into the Rust-style `data/` tree.
    */
-  private async _downloadSnapshot(
-    key: string,
-    layout: StorageLayout,
+  private async _downloadSnapshotFromUrl(
+    url: string,
+    dataPath: string,
   ): Promise<void> {
-    const dataPath = dataFilePath(layout.dataDir, key);
+    if (await fileExists(dataPath)) return;
 
-    // Download if we don't already have it in data/
-    if (!(await fileExists(dataPath))) {
-      const response = await this.downloadSnapshot({ key });
+    const response = await this._request(url, {
+      auth: "none",
+      redirect: "follow",
+    });
 
-      if (!response.ok) {
-        throw new PolarisError(
-          `Failed to download snapshot ${key}: HTTP ${response.status}`,
-        );
-      }
-
-      const buffer = Buffer.from(await response.arrayBuffer());
-      await mkdir(dirname(dataPath), { recursive: true });
-      await writeFile(dataPath, buffer);
+    if (!response.ok) {
+      throw new PolarisError(
+        `Failed to download snapshot from ${url}: HTTP ${response.status}`,
+      );
     }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await mkdir(dirname(dataPath), { recursive: true });
+    await writeFile(dataPath, buffer);
   }
 
   // -----------------------------------------------------------------------
@@ -1114,6 +1152,7 @@ function normalizeFlatCatalogMarket(entry: unknown): CatalogMarket {
       ? entry.categories.filter((value): value is string => typeof value === "string")
       : undefined,
     access: normalizeCatalogAccess(entry.access),
+    instrument: normalizeCatalogInstrument(entry.instrument),
   };
 }
 
@@ -1128,6 +1167,111 @@ function normalizeCatalogAccess(entry: unknown): CatalogMarket["access"] | undef
       typeof entry.public_cutoff_date === "string" || entry.public_cutoff_date === null
         ? entry.public_cutoff_date
         : undefined,
+  };
+}
+
+function normalizeCatalogInstrument(entry: unknown): CatalogInstrument {
+  if (!isRecord(entry)) {
+    return emptyCatalogInstrument();
+  }
+
+  return {
+    base: typeof entry.base === "string" ? entry.base : null,
+    quote: typeof entry.quote === "string" ? entry.quote : null,
+    tick_size: normalizeCatalogInstrumentNumber(entry.tick_size),
+    lot_size: normalizeCatalogInstrumentNumber(entry.lot_size),
+    min_notional: normalizeCatalogInstrumentNumber(entry.min_notional),
+  };
+}
+
+function normalizeCatalogInstrumentNumber(
+  value: unknown,
+): string | number | null {
+  return typeof value === "string" || typeof value === "number" ? value : null;
+}
+
+function emptyCatalogInstrument(): CatalogInstrument {
+  return {
+    base: null,
+    quote: null,
+    tick_size: null,
+    lot_size: null,
+    min_notional: null,
+  };
+}
+
+function normalizeSnapshotDownloadManifest(
+  payload: unknown,
+): SnapshotDownloadManifest {
+  if (!isRecord(payload)) {
+    throw new PolarisError("Download manifest response was not an object");
+  }
+
+  const { source, market, date, total, total_bytes, snapshots } = payload;
+  if (typeof source !== "string" || source.length === 0) {
+    throw new PolarisError("Download manifest did not include a valid source");
+  }
+  if (typeof market !== "string" || market.length === 0) {
+    throw new PolarisError("Download manifest did not include a valid market");
+  }
+  if (typeof date !== "string" || date.length === 0) {
+    throw new PolarisError("Download manifest did not include a valid date");
+  }
+  if (typeof total !== "number" || !Number.isFinite(total)) {
+    throw new PolarisError("Download manifest did not include a valid total");
+  }
+  if (typeof total_bytes !== "number" || !Number.isFinite(total_bytes)) {
+    throw new PolarisError("Download manifest did not include valid total_bytes");
+  }
+  if (!Array.isArray(snapshots)) {
+    throw new PolarisError("Download manifest did not include a valid snapshots array");
+  }
+
+  return {
+    source,
+    market,
+    date,
+    total,
+    total_bytes,
+    snapshots: snapshots.map((entry) => normalizeSnapshotDownloadEntry(entry)),
+  };
+}
+
+function normalizeSnapshotDownloadEntry(
+  entry: unknown,
+): SnapshotDownloadManifest["snapshots"][number] {
+  if (!isRecord(entry)) {
+    throw new PolarisError("Download manifest snapshot entry was not an object");
+  }
+
+  const { date, timestamp, key, url, expires_in_seconds } = entry;
+  if (typeof date !== "string" || date.length === 0) {
+    throw new PolarisError("Download manifest snapshot entry did not include a valid date");
+  }
+  if (typeof timestamp !== "string" || timestamp.length === 0) {
+    throw new PolarisError("Download manifest snapshot entry did not include a valid timestamp");
+  }
+  if (typeof key !== "string" || key.length === 0) {
+    throw new PolarisError("Download manifest snapshot entry did not include a valid key");
+  }
+  if (typeof url !== "string" || url.length === 0) {
+    throw new PolarisError("Download manifest snapshot entry did not include a valid url");
+  }
+  if (
+    typeof expires_in_seconds !== "number" ||
+    !Number.isFinite(expires_in_seconds)
+  ) {
+    throw new PolarisError(
+      "Download manifest snapshot entry did not include valid expires_in_seconds",
+    );
+  }
+
+  return {
+    date,
+    timestamp,
+    key,
+    url,
+    expires_in_seconds,
   };
 }
 
@@ -1490,6 +1634,12 @@ function formatHour(hour: number): string {
 
 function hourBucketKey(date: string, hour: number): string {
   return `${date}T${formatHour(hour)}`;
+}
+
+function snapshotHour(timestamp: string): number | undefined {
+  if (!/^\d{2}(\d{4})?$/.test(timestamp)) return undefined;
+  const hour = Number.parseInt(timestamp.slice(0, 2), 10);
+  return hour >= 0 && hour <= 23 ? hour : undefined;
 }
 
 function inferFilename(url: string): string | undefined {

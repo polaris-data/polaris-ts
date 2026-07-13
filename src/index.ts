@@ -49,7 +49,6 @@ export type {
   TradingViewOhlcvResponse,
   SnapshotEntry,
   SnapshotsResponse,
-  DownloadUrlResponse,
   SnapshotDownloadEntry,
   SnapshotDownloadManifest,
   PolarisClientOptions,
@@ -63,6 +62,5 @@ export type {
   DepthMetricsOptions,
   ListSnapshotsOptions,
   ReplayOptions,
-  DownloadSnapshotOptions,
   SnapshotDownloadManifestOptions,
 } from "./types";

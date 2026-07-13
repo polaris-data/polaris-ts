@@ -1,5 +1,5 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { decompress } from "fzstd";
 
 import type {
@@ -11,8 +11,6 @@ import type {
   CatalogResponse,
   DepthMetricsOptions,
   DepthMetricsRow,
-  DownloadSnapshotOptions,
-  DownloadUrlResponse,
   FetchLike,
   FundingRateEvent,
   HistoricalQueryOptions,
@@ -44,12 +42,14 @@ import {
   RateLimitedError,
 } from "./errors";
 
-import { toIso8601, toEpochMs, hoursInRange } from "./utils";
+import { toIso8601, toEpochMs, datesInRange } from "./utils";
 import {
   resolveRoot,
   ensureLayout,
   dataFilePath,
-  standardHourlyDataFilePath,
+  parseSnapshotKey,
+  inferSnapshotStartMs,
+  inferSnapshotEndMs,
   fileExists,
   type StorageLayout,
 } from "./storage";
@@ -59,7 +59,7 @@ import { OhlcvAggregator } from "./aggregator";
 // SDK version – bumped manually during releases
 // ---------------------------------------------------------------------------
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 // ---------------------------------------------------------------------------
 // Internal shorthand
@@ -85,6 +85,25 @@ interface CatalogMarketBounds {
   endMs: number;
   accessStatus?: string;
   publicCutoffMs?: number;
+}
+
+interface GapInterval {
+  startMs: number;
+  endMs: number;
+}
+
+interface ResolvedSnapshotCoverage {
+  paths: string[];
+  gaps: GapInterval[];
+}
+
+interface LocalSnapshotFileEntry extends SnapshotEntry {
+  path: string;
+  source: string;
+  market: string;
+  date: string;
+  startMs?: number;
+  endMs?: number;
 }
 
 const DEFAULT_INFERRED_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -152,12 +171,12 @@ export class PolarisClient {
       if (cursor) params.cursor = cursor;
 
       const res = await this._getJson<{
-        snapshots: SnapshotEntry[];
+        snapshots: unknown[];
         next_cursor: string | null;
         has_more: boolean;
       }>("/snapshots", { params, auth: "if-available" });
 
-      entries.push(...res.snapshots);
+      entries.push(...res.snapshots.map((entry) => normalizeSnapshotEntry(entry)));
       cursor = res.has_more ? (res.next_cursor ?? undefined) : undefined;
     } while (cursor);
 
@@ -172,13 +191,13 @@ export class PolarisClient {
    * Return all standardised historical events for a time range.
    *
    * Reads from locally-cached standard snapshot files in `data/`.
-   * Missing hourly snapshots are discovered via daily `GET /download`
+   * Missing standardized snapshots are discovered via daily `GET /download`
    * manifests and downloaded automatically.
    */
   async events(options: HistoricalQueryOptions): Promise<Json[]> {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: Json[] = [];
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -198,7 +217,7 @@ export class PolarisClient {
   async trades(options: HistoricalQueryOptions): Promise<Json[]> {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: Json[] = [];
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -221,7 +240,7 @@ export class PolarisClient {
   ): Promise<OrderbookEvent[]> {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: OrderbookEvent[] = [];
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -240,7 +259,7 @@ export class PolarisClient {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: BboQuote[] = [];
 
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -263,7 +282,7 @@ export class PolarisClient {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: FundingRateEvent[] = [];
 
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -285,7 +304,7 @@ export class PolarisClient {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: MarkPriceEvent[] = [];
 
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -316,7 +335,7 @@ export class PolarisClient {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const agg = new VwapAggregator(options.interval);
 
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -344,7 +363,7 @@ export class PolarisClient {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const agg = new VolatilityAggregator(options.interval);
 
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -379,7 +398,7 @@ export class PolarisClient {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const result: DepthMetricsRow[] = [];
 
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -403,7 +422,7 @@ export class PolarisClient {
     const { fromMs, toMs } = await this._resolveHistoricalRange(options);
     const agg = new OhlcvAggregator(options.interval);
 
-    for await (const event of this._readHourlyEvents(
+    for await (const event of this._readSnapshotEvents(
       options.source,
       options.market,
       fromMs,
@@ -465,7 +484,7 @@ export class PolarisClient {
   async *replay(options: ReplayOptions): AsyncGenerator<Json> {
     if (options.standard !== false) {
       const { fromMs, toMs } = await this._resolveHistoricalRange(options);
-      yield* this._readHourlyEvents(
+      yield* this._readSnapshotEvents(
         options.source,
         options.market,
         fromMs,
@@ -500,30 +519,6 @@ export class PolarisClient {
   // -----------------------------------------------------------------------
 
   /**
-   * Download a single snapshot file by key.
-   *
-   * Returns the native `Response` so you can consume the body as needed
-   * (`.arrayBuffer()`, `.blob()`, or pipe to a writable stream).
-   */
-  async downloadSnapshot(
-    options: DownloadSnapshotOptions,
-  ): Promise<Response> {
-    const params: Record<string, string> = { key: options.key };
-    if (options.mode) params.mode = options.mode;
-
-    const response = await this._request("/download", {
-      params,
-      auth: "if-available",
-      redirect: "follow",
-    });
-    if (!response.ok) {
-      const body = await response.text();
-      assertOk(response, body);
-    }
-    return response;
-  }
-
-  /**
    * Get all pre-signed download URLs for a source/market UTC date in one call.
    */
   async getSnapshotDownloadUrls(
@@ -540,42 +535,6 @@ export class PolarisClient {
     });
 
     return normalizeSnapshotDownloadManifest(payload);
-  }
-
-  /**
-   * Get a pre-signed download URL for a snapshot file
-   * without fetching the file itself.
-   */
-  async getSnapshotDownloadUrl(
-    options: DownloadSnapshotOptions,
-  ): Promise<DownloadUrlResponse> {
-    const response = await this._request("/download", {
-      params: { key: options.key, mode: "json" },
-      auth: "if-available",
-      redirect: "manual",
-      headers: { Accept: "application/json" },
-    });
-
-    const location = response.headers.get("location");
-    if (response.status >= 300 && response.status < 400 && location) {
-      return { url: location, filename: inferFilename(location) };
-    }
-
-    const body = await response.text();
-    assertOk(response, body);
-
-    let json: unknown;
-    try {
-      json = JSON.parse(body);
-    } catch {
-      throw new PolarisError("Failed to parse response as JSON");
-    }
-
-    if (typeof json !== "object" || json === null || Array.isArray(json)) {
-      throw new PolarisError("Expected a JSON object response");
-    }
-
-    return json as DownloadUrlResponse;
   }
 
   // -----------------------------------------------------------------------
@@ -675,24 +634,24 @@ export class PolarisClient {
   }
 
   /**
-   * Core routine: ensure hourly standard snapshots exist in `data/`,
-   * decompress them, and yield matching events one at a time.
+   * Core routine: resolve standardized snapshot coverage for a time range,
+   * materialize missing files locally, and yield matching events one at a time.
    */
-  private _readHourlyEvents<T extends Json>(
+  private _readSnapshotEvents<T extends Json>(
     source: string,
     market: string,
     fromMs: number,
     toMs: number,
     filter: (event: Json) => event is T,
   ): AsyncGenerator<T>;
-  private _readHourlyEvents(
+  private _readSnapshotEvents(
     source: string,
     market: string,
     fromMs: number,
     toMs: number,
     filter?: (event: Json) => boolean,
   ): AsyncGenerator<Json>;
-  private async *_readHourlyEvents(
+  private async *_readSnapshotEvents(
     source: string,
     market: string,
     fromMs: number,
@@ -700,15 +659,21 @@ export class PolarisClient {
     filter?: (event: Json) => boolean,
   ): AsyncGenerator<Json> {
     const layout = await this._getLayout();
-    const hours = hoursInRange(fromMs, toMs);
-    const filePaths = await this._ensureHourlySnapshots(
+    const coverage = await this._resolveSnapshotCoverage(
       source,
       market,
-      hours,
+      fromMs,
+      toMs,
       layout,
     );
 
-    for (const filePath of filePaths) {
+    if (coverage.paths.length === 0 || coverage.gaps.length > 0) {
+      throw new PolarisError(
+        `Requested standardized snapshot range could not be satisfied for '${source}/${market}'`,
+      );
+    }
+
+    for (const filePath of coverage.paths) {
       const lines = await readSnapshotLines(filePath);
       for (const line of lines) {
         let event: Json;
@@ -718,81 +683,390 @@ export class PolarisClient {
           continue;
         }
 
-        const ts = event.timestamp as number;
-        if (ts < fromMs || ts >= toMs) continue;
+        const ts = normalizeTimestampMs(event.timestamp);
+        if (ts === undefined || ts < fromMs || ts >= toMs) continue;
         if (filter && !filter(event)) continue;
 
+        if (event.timestamp !== ts) {
+          event = { ...event, timestamp: ts };
+        }
         yield event;
       }
     }
   }
 
-  /**
-   * Ensure every requested hour has a local standard snapshot in `data/`.
-   * Downloads missing snapshots into the Rust-style snapshot layout.
-   */
-  private async _ensureHourlySnapshots(
+  private async _resolveSnapshotCoverage(
     source: string,
     market: string,
-    hours: Array<{ date: string; hour: number }>,
+    fromMs: number,
+    toMs: number,
     layout: StorageLayout,
-  ): Promise<string[]> {
-    const paths: string[] = [];
-    if (hours.length === 0) return paths;
+  ): Promise<ResolvedSnapshotCoverage> {
+    const requiredDates = datesInRange(fromMs, toMs);
+    const requiredRangesByDay = this._requiredSnapshotRangesByDay(fromMs, toMs);
 
-    const missing = new Map<string, { date: string; hour: number }>();
-    for (const { date, hour } of hours) {
-      const dataPath = standardHourlyDataFilePath(
-        layout.dataDir,
-        source,
-        market,
-        date,
-        hour,
+    const localSnapshots = await this._listLocalSnapshots(
+      layout,
+      source,
+      market,
+      requiredDates,
+    );
+
+    const localByDay = new Map<string, LocalSnapshotFileEntry[]>();
+    for (const entry of localSnapshots) {
+      const dayEntries = localByDay.get(entry.date) ?? [];
+      dayEntries.push(entry);
+      localByDay.set(entry.date, dayEntries);
+    }
+
+    const localPaths: string[] = [];
+    const localGaps: GapInterval[] = [];
+    for (const date of requiredDates) {
+      const range = requiredRangesByDay.get(date);
+      if (!range) continue;
+
+      const selection = this._resolveSnapshotDaySelection(
+        localByDay.get(date) ?? [],
+        range.startMs,
+        range.endMs,
+        utcDayStartMs(date),
       );
-      paths.push(dataPath);
-      if (!(await fileExists(dataPath))) {
-        missing.set(hourBucketKey(date, hour), { date, hour });
+      localPaths.push(...selection.selected.map((entry) => entry.path));
+      localGaps.push(...selection.gaps);
+    }
+
+    if (localPaths.length > 0 && localGaps.length === 0) {
+      return { paths: localPaths, gaps: [] };
+    }
+
+    const snapshotQueryStartMs = utcDayStartMs(requiredDates[0] ?? epochMsToDate(fromMs));
+    const snapshotQueryEndMs =
+      utcDayStartMs(requiredDates.at(-1) ?? epochMsToDate(toMs - 1)) + 86_400_000;
+    const remoteSnapshots = await this.listSnapshots({
+      source,
+      market,
+      from: snapshotQueryStartMs,
+      to: snapshotQueryEndMs,
+    });
+
+    const remoteByDay = new Map<string, SnapshotEntry[]>();
+    for (const snapshot of remoteSnapshots) {
+      const date = snapshot.date ?? inferredSnapshotDate(snapshot.key);
+      if (!date || !requiredRangesByDay.has(date)) continue;
+      const dayEntries = remoteByDay.get(date) ?? [];
+      dayEntries.push(snapshot);
+      remoteByDay.set(date, dayEntries);
+    }
+
+    const selectedSnapshots: SnapshotEntry[] = [];
+    const gaps: GapInterval[] = [];
+    for (const date of requiredDates) {
+      const range = requiredRangesByDay.get(date);
+      if (!range) continue;
+
+      const selection = this._resolveSnapshotDaySelection(
+        remoteByDay.get(date) ?? [],
+        range.startMs,
+        range.endMs,
+        utcDayStartMs(date),
+      );
+      selectedSnapshots.push(...selection.selected);
+      gaps.push(...selection.gaps);
+    }
+
+    const localByKey = new Map(localSnapshots.map((entry) => [entry.key, entry] as const));
+    const missingSnapshots = selectedSnapshots.filter((snapshot) => {
+      const local = localByKey.get(snapshot.key);
+      return !local;
+    });
+    if (missingSnapshots.length > 0) {
+      const ensured = await this._ensureLocalSnapshots(
+        missingSnapshots,
+        layout,
+      );
+      for (const entry of ensured) {
+        localByKey.set(entry.key, entry);
       }
     }
 
-    if (missing.size === 0) return paths;
+    const paths: string[] = [];
+    for (const snapshot of selectedSnapshots) {
+      const local = localByKey.get(snapshot.key);
+      if (!local || !(await fileExists(local.path))) {
+        throw new PolarisError(
+          "Selected standardized snapshots could not be materialized locally",
+        );
+      }
+      paths.push(local.path);
+    }
 
-    const dates = Array.from(
-      new Set(Array.from(missing.values(), ({ date }) => date)),
-    ).sort();
+    return { paths, gaps };
+  }
+
+  private _requiredSnapshotRangesByDay(
+    fromMs: number,
+    toMs: number,
+  ): Map<string, { startMs: number; endMs: number }> {
+    const ranges = new Map<string, { startMs: number; endMs: number }>();
+    for (const date of datesInRange(fromMs, toMs)) {
+      const dayStartMs = utcDayStartMs(date);
+      ranges.set(date, {
+        startMs: Math.max(fromMs, dayStartMs),
+        endMs: Math.min(toMs, dayStartMs + 86_400_000),
+      });
+    }
+    return ranges;
+  }
+
+  private _resolveSnapshotDaySelection<T extends SnapshotEntry | LocalSnapshotFileEntry>(
+    entries: T[],
+    rangeStartMs: number,
+    rangeEndMs: number,
+    dayStartMs: number,
+  ): { selected: T[]; gaps: GapInterval[] } {
+    if (entries.length === 0) {
+      return {
+        selected: [],
+        gaps: [{ startMs: rangeStartMs, endMs: rangeEndMs }],
+      };
+    }
+
+    const dayEndMs = dayStartMs + 86_400_000;
+    const dailyEntries = entries
+      .filter((entry) => {
+        const bounds = this._snapshotEntryBounds(entry);
+        return bounds.startMs === undefined && bounds.endMs === undefined && entry.hour === undefined;
+      })
+      .sort((a, b) => a.key.localeCompare(b.key));
+    if (dailyEntries.length > 0) {
+      return { selected: [dailyEntries[0]], gaps: [] };
+    }
+
+    const ordered = entries
+      .map((entry) => ({ entry, ...this._snapshotEntryBounds(entry) }))
+      .filter(
+        (
+          item,
+        ): item is { entry: T; startMs: number; endMs?: number } => item.startMs !== undefined,
+      )
+      .sort((a, b) => a.startMs - b.startMs || a.entry.key.localeCompare(b.entry.key));
+
+    const intervals: Array<{ entry: T; startMs: number; endMs: number }> = [];
+    for (let index = 0; index < ordered.length; index += 1) {
+      const current = ordered[index];
+      let resolvedEndMs = current.endMs;
+      if (resolvedEndMs === undefined) {
+        for (let next = index + 1; next < ordered.length; next += 1) {
+          if (ordered[next].startMs > current.startMs) {
+            resolvedEndMs = ordered[next].startMs;
+            break;
+          }
+        }
+      }
+      resolvedEndMs ??= dayEndMs;
+      if (resolvedEndMs <= current.startMs) continue;
+      intervals.push({
+        entry: current.entry,
+        startMs: current.startMs,
+        endMs: resolvedEndMs,
+      });
+    }
+
+    const selected: T[] = [];
+    const coveredRanges: Array<{ startMs: number; endMs: number }> = [];
+    const seen = new Set<string>();
+    for (const interval of intervals) {
+      const overlapStartMs = Math.max(rangeStartMs, interval.startMs);
+      const overlapEndMs = Math.min(rangeEndMs, interval.endMs);
+      if (overlapStartMs >= overlapEndMs) continue;
+
+      if (!seen.has(interval.entry.key)) {
+        selected.push(interval.entry);
+        seen.add(interval.entry.key);
+      }
+      coveredRanges.push({ startMs: overlapStartMs, endMs: overlapEndMs });
+    }
+
+    return {
+      selected,
+      gaps: this._gapIntervalsFromRanges(rangeStartMs, rangeEndMs, coveredRanges),
+    };
+  }
+
+  private _gapIntervalsFromRanges(
+    startMs: number,
+    endMs: number,
+    coveredRanges: Array<{ startMs: number; endMs: number }>,
+  ): GapInterval[] {
+    const gaps: GapInterval[] = [];
+    let cursorMs = startMs;
+
+    for (const range of coveredRanges.sort((a, b) => a.startMs - b.startMs)) {
+      if (range.endMs <= cursorMs) continue;
+      if (range.startMs > cursorMs) {
+        gaps.push({ startMs: cursorMs, endMs: range.startMs });
+      }
+      cursorMs = Math.max(cursorMs, range.endMs);
+    }
+
+    if (cursorMs < endMs) {
+      gaps.push({ startMs: cursorMs, endMs });
+    }
+
+    return gaps;
+  }
+
+  private _snapshotEntryBounds(
+    entry: SnapshotEntry | LocalSnapshotFileEntry,
+  ): { startMs?: number; endMs?: number } {
+    if ("startMs" in entry || "endMs" in entry) {
+      return {
+        startMs: entry.startMs,
+        endMs: entry.endMs,
+      };
+    }
+
+    const startMs = parseSnapshotDateTime(entry.start) ??
+      (entry.date ? inferSnapshotStartMs(entry.key, entry.date) : undefined);
+    const endMs = parseSnapshotDateTime(entry.end) ??
+      (entry.date ? inferSnapshotEndMs(entry.key, entry.date) : undefined);
+
+    if (startMs !== undefined) {
+      return { startMs, endMs };
+    }
+
+    if (entry.date && entry.hour !== undefined) {
+      const fallbackStartMs = utcDayStartMs(entry.date) + entry.hour * 3_600_000;
+      return {
+        startMs: fallbackStartMs,
+        endMs: endMs ?? fallbackStartMs + 3_600_000,
+      };
+    }
+
+    return {};
+  }
+
+  private async _listLocalSnapshots(
+    layout: StorageLayout,
+    source: string,
+    market: string,
+    dates: string[],
+  ): Promise<LocalSnapshotFileEntry[]> {
+    const snapshots: LocalSnapshotFileEntry[] = [];
 
     for (const date of dates) {
-      const manifest = await this.getSnapshotDownloadUrls({
-        source,
-        market,
-        date,
-      });
+      const dir = join(layout.dataDir, "standard", source, market, date);
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
 
-      for (const snapshot of manifest.snapshots) {
-        const hour = snapshotHour(snapshot.timestamp);
-        if (hour === undefined) continue;
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(".jsonl.zst")) continue;
 
-        const bucket = hourBucketKey(snapshot.date, hour);
-        if (!missing.has(bucket)) continue;
+        const key = entry.name.slice(0, -".jsonl.zst".length);
+        try {
+          const parsed = parseSnapshotKey(key);
+          if (
+            parsed.tier !== "standard" ||
+            parsed.source !== source ||
+            parsed.market !== market ||
+            parsed.date !== date
+          ) {
+            continue;
+          }
 
-        await this._downloadSnapshotFromUrl(
-          snapshot.url,
-          // Use the opaque snapshot key from the API so markets like
-          // `AAPL-USD` are preserved exactly in the local cache path.
-          dataFilePath(layout.dataDir, snapshot.key),
-        );
-        missing.delete(bucket);
+          const path = join(dir, entry.name);
+          snapshots.push({
+            key,
+            source,
+            market,
+            date,
+            hour: parsed.hour,
+            filename: parsed.filename,
+            path,
+            startMs: inferSnapshotStartMs(key, date),
+            endMs: inferSnapshotEndMs(key, date),
+          });
+        } catch {
+          continue;
+        }
       }
     }
 
-    if (missing.size > 0) {
-      const [bucket] = missing.keys();
-      throw new PolarisError(
-        `No snapshot available for ${source}/${market} during ${bucket.replace("T", " ")}`,
-      );
+    snapshots.sort((a, b) =>
+      (a.startMs ?? Number.MAX_SAFE_INTEGER) - (b.startMs ?? Number.MAX_SAFE_INTEGER) ||
+      a.key.localeCompare(b.key),
+    );
+    return snapshots;
+  }
+
+  private async _ensureLocalSnapshots(
+    snapshots: SnapshotEntry[],
+    layout: StorageLayout,
+  ): Promise<LocalSnapshotFileEntry[]> {
+    const grouped = new Map<string, SnapshotEntry[]>();
+    for (const snapshot of snapshots) {
+      const source = snapshot.source ?? inferredSnapshotSource(snapshot.key);
+      const market = snapshot.market ?? inferredSnapshotMarket(snapshot.key);
+      const date = snapshot.date ?? inferredSnapshotDate(snapshot.key);
+      if (!source || !market || !date) {
+        throw new PolarisError(
+          `Snapshot '${snapshot.key}' did not include source, market, or date metadata`,
+        );
+      }
+
+      const groupKey = `${source}\u0000${market}\u0000${date}`;
+      const group = grouped.get(groupKey) ?? [];
+      group.push({ ...snapshot, source, market, date });
+      grouped.set(groupKey, group);
     }
 
-    return paths;
+    for (const group of grouped.values()) {
+      const first = group[0];
+      const manifest = await this.getSnapshotDownloadUrls({
+        source: first.source as string,
+        market: first.market as string,
+        date: first.date as string,
+      });
+      const manifestUrls = new Map(
+        manifest.snapshots.map((entry) => [entry.key, entry.url] as const),
+      );
+
+      for (const snapshot of group) {
+        const url = manifestUrls.get(snapshot.key);
+        if (!url) {
+          throw new NotFoundError(
+            `Bulk download manifest did not include selected snapshot '${snapshot.key}'`,
+          );
+        }
+
+        await this._downloadSnapshotFromUrl(
+          url,
+          dataFilePath(layout.dataDir, snapshot.key),
+        );
+      }
+    }
+
+    const ensured = await this._listLocalSnapshots(
+      layout,
+      snapshots[0]?.source ?? "",
+      snapshots[0]?.market ?? "",
+      Array.from(new Set(snapshots.map((snapshot) => snapshot.date ?? inferredSnapshotDate(snapshot.key)).filter(Boolean) as string[])),
+    );
+    const byKey = new Map(ensured.map((entry) => [entry.key, entry] as const));
+
+    return snapshots.map((snapshot) => {
+      const local = byKey.get(snapshot.key);
+      if (!local) {
+        throw new PolarisError(
+          `Snapshot '${snapshot.key}' could not be materialized locally`,
+        );
+      }
+      return local;
+    });
   }
 
   /**
@@ -1195,6 +1469,61 @@ function emptyCatalogInstrument(): CatalogInstrument {
     lot_size: null,
     min_notional: null,
   };
+}
+
+function normalizeSnapshotEntry(entry: unknown): SnapshotEntry {
+  if (!isRecord(entry)) {
+    throw new PolarisError("Snapshot entry was not an object");
+  }
+
+  const key = entry.key ?? entry.path ?? entry.name;
+  if (typeof key !== "string" || key.length === 0) {
+    throw new PolarisError("Snapshot entry did not include a valid key");
+  }
+
+  let inferred: ReturnType<typeof parseSnapshotKey> | undefined;
+  try {
+    inferred = parseSnapshotKey(key);
+  } catch {
+    inferred = undefined;
+  }
+
+  const date =
+    typeof entry.date === "string" && entry.date.length > 0
+      ? entry.date
+      : inferred?.date;
+  const source =
+    typeof entry.source === "string" && entry.source.length > 0
+      ? entry.source
+      : inferred?.source;
+  const market =
+    typeof entry.market === "string" && entry.market.length > 0
+      ? entry.market
+      : inferred?.market;
+  const hour =
+    typeof entry.hour === "number" && Number.isInteger(entry.hour) &&
+    entry.hour >= 0 && entry.hour <= 23
+      ? entry.hour
+      : inferred?.hour;
+
+  return {
+    key,
+    source,
+    market,
+    date,
+    start: normalizeSnapshotDateTime(entry.start),
+    end: normalizeSnapshotDateTime(entry.end),
+    hour,
+    filename:
+      typeof entry.filename === "string" && entry.filename.length > 0
+        ? entry.filename
+        : inferred?.filename,
+  };
+}
+
+function normalizeSnapshotDateTime(value: unknown): string | undefined {
+  const parsedMs = parseSnapshotDateTime(value);
+  return parsedMs === undefined ? undefined : new Date(parsedMs).toISOString();
 }
 
 function normalizeSnapshotDownloadManifest(
@@ -1625,31 +1954,56 @@ async function readSnapshotLines(filePath: string): Promise<string[]> {
   return text.split("\n").filter((l) => l.trim().length > 0);
 }
 
-function formatHour(hour: number): string {
-  return String(hour).padStart(2, "0");
+function normalizeTimestampMs(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const timestamp = Math.trunc(value);
+  return Math.abs(timestamp) >= 100_000_000_000_000
+    ? Math.trunc(timestamp / 1_000)
+    : timestamp;
 }
 
-function hourBucketKey(date: string, hour: number): string {
-  return `${date}T${formatHour(hour)}`;
+function parseSnapshotDateTime(value: unknown): number | undefined {
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = new Date(value).getTime();
+    return Number.isNaN(parsed) ? undefined : parsed;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return normalizeTimestampMs(value);
+  }
+  return undefined;
 }
 
-function snapshotHour(timestamp: string): number | undefined {
-  if (!/^\d{2}(\d{4})?$/.test(timestamp)) return undefined;
-  const hour = Number.parseInt(timestamp.slice(0, 2), 10);
-  return hour >= 0 && hour <= 23 ? hour : undefined;
+function utcDayStartMs(date: string): number {
+  const parsed = new Date(`${date}T00:00:00Z`).getTime();
+  if (Number.isNaN(parsed)) {
+    throw new PolarisError(`Invalid UTC date: ${date}`);
+  }
+  return parsed;
 }
 
-function inferFilename(url: string): string | undefined {
+function epochMsToDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function inferredSnapshotSource(key: string): string | undefined {
   try {
-    const parsed = new URL(url);
-    const fromDisposition = parsed.searchParams.get("response-content-disposition");
-    if (fromDisposition) {
-      const match = fromDisposition.match(/filename="?([^";]+)"?/);
-      if (match) return match[1];
-    }
+    return parseSnapshotKey(key).source;
+  } catch {
+    return undefined;
+  }
+}
 
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    return parts.at(-1);
+function inferredSnapshotMarket(key: string): string | undefined {
+  try {
+    return parseSnapshotKey(key).market;
+  } catch {
+    return undefined;
+  }
+}
+
+function inferredSnapshotDate(key: string): string | undefined {
+  try {
+    return parseSnapshotKey(key).date;
   } catch {
     return undefined;
   }

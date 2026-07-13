@@ -88,8 +88,7 @@ Use it to inspect available data and query historical market data.
 | --- | --- | --- |
 | `replay(opts)` | Async iterator of historical events | Backfills and replay-style processing without materializing everything up front |
 | `raw(opts)` | Throws `PolarisError` in the TypeScript SDK | Reserved for parity with other SDKs; TypeScript historical access remains snapshot-first |
-| `downloadSnapshot(opts)` | Native `Response` for a snapshot artifact | Manual snapshot download and custom file handling |
-| `getSnapshotDownloadUrl(opts)` | Resolved pre-signed snapshot URL | External download workflows or passing snapshot URLs to other systems |
+| `getSnapshotDownloadUrls(opts)` | Daily bulk manifest with pre-signed snapshot URLs | Bulk historical downloads for a single `source` / `market` / UTC `date` |
 
 ### Standardized Data Schemas
 
@@ -134,7 +133,7 @@ import { PolarisClient } from "polaris-data";
 
 const client = new PolarisClient({ apiKey: "polaris_key_your_key" });
 
-// First call downloads the hourly snapshot; subsequent calls read locally
+// First call downloads the required standardized snapshot files; subsequent calls read locally
 const rows = await client.events({
   source: "binance",
   market: "BTC-USDT",
@@ -291,11 +290,16 @@ for (const s of snapshots) {
   console.log(s.date, s.hour, s.key);
 }
 
-// Download a snapshot file
-const response = await client.downloadSnapshot({
-  key: "standard-hyperliquid-BTC-2026-06-27-00",
+// Get the daily bulk manifest
+const manifest = await client.getSnapshotDownloadUrls({
+  source: "hyperliquid",
+  market: "BTC-USD",
+  date: "2024-01-01",
 });
-const buffer = await response.arrayBuffer();
+
+for (const snapshot of manifest.snapshots) {
+  console.log(snapshot.timestamp, snapshot.url);
+}
 ```
 
 ## Error handling

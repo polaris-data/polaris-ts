@@ -85,7 +85,8 @@ export interface SnapshotKeyParts {
   readonly source: string;
   readonly market: string;
   readonly date: string;
-  readonly hour: number;
+  readonly timeSuffix?: string;
+  readonly hour?: number;
   readonly opaqueKey: string;
   readonly filename: string;
 }
@@ -95,54 +96,80 @@ export function parseSnapshotKey(key: string): SnapshotKeyParts {
   const opaqueKey = key.endsWith(SNAPSHOT_EXT)
     ? key.slice(0, -SNAPSHOT_EXT.length)
     : key;
-  const parts = opaqueKey.split("-");
-  if (parts.length < 7) {
+  const parts = opaqueKey.split("-").filter(Boolean);
+  if (parts.length < 6) {
     throw new Error(`Invalid snapshot key: ${key}`);
   }
 
   const tier = parts[0];
   const source = parts[1];
-  const hourPart = parts.at(-1);
-  const day = parts.at(-2);
-  const month = parts.at(-3);
-  const year = parts.at(-4);
-  const market = parts.slice(2, -4).join("-");
+  if (!tier || !source) throw new Error(`Invalid snapshot key: ${key}`);
 
-  if (
-    !tier ||
-    !source ||
-    !market ||
-    !year ||
-    !month ||
-    !day ||
-    !hourPart ||
-    !/^\d{4}$/.test(year) ||
-    !/^\d{2}$/.test(month) ||
-    !/^\d{2}$/.test(day) ||
-    !/^\d{2}$/.test(hourPart)
-  ) {
-    throw new Error(`Invalid snapshot key: ${key}`);
+  for (let dateIndex = parts.length - 3; dateIndex >= 3; dateIndex -= 1) {
+    const date = parts.slice(dateIndex, dateIndex + 3).join("-");
+    if (!isStrictIsoDate(date)) continue;
+
+    const market = parts.slice(2, dateIndex).join("-");
+    if (!market) continue;
+
+    const suffixParts = parts.slice(dateIndex + 3);
+    const timeSuffix =
+      suffixParts.length === 1 && /^\d+$/.test(suffixParts[0])
+        ? suffixParts[0]
+        : undefined;
+    const parsedTime = timeSuffix ? parseSnapshotTimeSuffix(timeSuffix) : undefined;
+
+    return {
+      tier,
+      source,
+      market,
+      date,
+      timeSuffix,
+      hour: parsedTime?.hour,
+      opaqueKey,
+      filename: `${opaqueKey}${SNAPSHOT_EXT}`,
+    };
   }
 
-  return {
-    tier,
-    source,
-    market,
-    date: `${year}-${month}-${day}`,
-    hour: Number(hourPart),
-    opaqueKey,
-    filename: `${opaqueKey}${SNAPSHOT_EXT}`,
-  };
+  throw new Error(`Invalid snapshot key: ${key}`);
 }
 
-/** Build the canonical standard snapshot key for a source/market/hour. */
-export function standardSnapshotKey(
-  source: string,
-  market: string,
-  date: string,
-  hour: number,
-): string {
-  return `standard-${source}-${market}-${date}-${String(hour).padStart(2, "0")}`;
+export function inferSnapshotStartMs(
+  key: string,
+  dateText?: string,
+): number | undefined {
+  const parsed = parseSnapshotKey(key);
+  const resolvedDate = dateText ?? parsed.date;
+  if (!parsed.timeSuffix) return undefined;
+
+  const time = parseSnapshotTimeSuffix(parsed.timeSuffix);
+  if (!time || !isStrictIsoDate(resolvedDate)) return undefined;
+
+  return Date.UTC(
+    Number.parseInt(resolvedDate.slice(0, 4), 10),
+    Number.parseInt(resolvedDate.slice(5, 7), 10) - 1,
+    Number.parseInt(resolvedDate.slice(8, 10), 10),
+    time.hour,
+    time.minute,
+    time.second,
+  );
+}
+
+export function inferSnapshotEndMs(
+  key: string,
+  dateText?: string,
+): number | undefined {
+  const parsed = parseSnapshotKey(key);
+  if (!parsed.timeSuffix) return undefined;
+
+  const startMs = inferSnapshotStartMs(key, dateText ?? parsed.date);
+  if (startMs === undefined) return undefined;
+
+  // Legacy hour-only suffixes imply one-hour standardized coverage.
+  if (parsed.timeSuffix.length === 1 || parsed.timeSuffix.length === 2) {
+    return startMs + 3_600_000;
+  }
+  return undefined;
 }
 
 /** Path for a downloaded snapshot file in the Rust-style `data/` tree. */
@@ -158,17 +185,6 @@ export function dataFilePath(dataDir: string, key: string): string {
   );
 }
 
-/** Path for a standard hourly snapshot file in the Rust-style `data/` tree. */
-export function standardHourlyDataFilePath(
-  dataDir: string,
-  source: string,
-  market: string,
-  date: string,
-  hour: number,
-): string {
-  return dataFilePath(dataDir, standardSnapshotKey(source, market, date, hour));
-}
-
 /** Return `true` when the file at `path` exists. */
 export async function fileExists(path: string): Promise<boolean> {
   try {
@@ -177,4 +193,46 @@ export async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function parseSnapshotTimeSuffix(
+  suffix: string,
+): { hour: number; minute: number; second: number } | undefined {
+  if (!/^\d+$/.test(suffix)) return undefined;
+
+  let hour: number;
+  let minute: number;
+  let second: number;
+
+  if (suffix.length === 1 || suffix.length === 2) {
+    hour = Number.parseInt(suffix, 10);
+    minute = 0;
+    second = 0;
+  } else if (suffix.length === 4) {
+    hour = Number.parseInt(suffix.slice(0, 2), 10);
+    minute = Number.parseInt(suffix.slice(2, 4), 10);
+    second = 0;
+  } else if (suffix.length === 6) {
+    hour = Number.parseInt(suffix.slice(0, 2), 10);
+    minute = Number.parseInt(suffix.slice(2, 4), 10);
+    second = Number.parseInt(suffix.slice(4, 6), 10);
+  } else {
+    return undefined;
+  }
+
+  if (
+    hour < 0 || hour > 23 ||
+    minute < 0 || minute > 59 ||
+    second < 0 || second > 59
+  ) {
+    return undefined;
+  }
+
+  return { hour, minute, second };
+}
+
+function isStrictIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().startsWith(value);
 }

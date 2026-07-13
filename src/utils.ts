@@ -47,9 +47,11 @@ export function toEpochMs(value: TimeInput): number {
  * exclusive end).
  */
 export function datesInRange(fromMs: number, toMs: number): string[] {
+  if (toMs <= fromMs) return [];
+
   const dates: string[] = [];
   const start = new Date(fromMs);
-  const end = new Date(toMs);
+  const end = new Date(toMs - 1);
 
   const cur = new Date(
     Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()),

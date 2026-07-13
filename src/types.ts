@@ -224,8 +224,12 @@ export interface TradingViewOhlcvResponse {
 // ---------------------------------------------------------------------------
 
 export interface SnapshotEntry {
-  date: string;
   key: string;
+  source?: string;
+  market?: string;
+  date?: string;
+  start?: string;
+  end?: string;
   hour?: number;
   filename?: string;
 }
@@ -246,14 +250,8 @@ export interface SnapshotsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot download – GET /download
+// Snapshot download manifest – GET /download
 // ---------------------------------------------------------------------------
-
-export interface DownloadUrlResponse {
-  url: string;
-  filename?: string;
-  expires_in_seconds?: number;
-}
 
 export interface SnapshotDownloadEntry {
   date: string;
@@ -361,11 +359,6 @@ export interface ReplayOptions {
   to?: TimeInput;
   /** `true` (default) streams standardised events from local snapshots. */
   standard?: boolean;
-}
-
-export interface DownloadSnapshotOptions {
-  key: string;
-  mode?: "json";
 }
 
 export interface SnapshotDownloadManifestOptions {

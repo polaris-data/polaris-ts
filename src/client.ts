@@ -58,7 +58,7 @@ import type { PolarisRuntime } from "./runtime/types";
 // SDK version – bumped manually during releases
 // ---------------------------------------------------------------------------
 
-const VERSION = "0.5.1";
+const VERSION = "0.5.2";
 
 // ---------------------------------------------------------------------------
 // Internal shorthand

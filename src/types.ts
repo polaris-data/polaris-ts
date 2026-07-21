@@ -289,6 +289,11 @@ export interface PolarisClientOptions {
    * overridable globally via `POLARIS_ROOT` env var.
    */
   datasetRoot?: string;
+  /**
+   * Custom storage implementation (useful for testing or advanced scenarios).
+   * If not provided, storage is automatically detected based on platform.
+   */
+  storage?: import("./storage/interface").IStorage;
 }
 
 // ---------------------------------------------------------------------------

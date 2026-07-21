@@ -1,5 +1,3 @@
-import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import { decompress } from "fzstd";
 
 import type {
@@ -54,6 +52,8 @@ import {
   type StorageLayout,
 } from "./storage";
 import { OhlcvAggregator } from "./aggregator";
+import type { IStorage } from "./storage/interface";
+import { createStorage } from "./storage/interface";
 
 // ---------------------------------------------------------------------------
 // SDK version – bumped manually during releases
@@ -118,6 +118,7 @@ export class PolarisClient {
   private readonly _timeout: number;
   private readonly _fetch: FetchLike;
   private readonly _root: string;
+  private _storage: IStorage | undefined;
   private _layout: StorageLayout | undefined;
 
   constructor(options: PolarisClientOptions = {}) {
@@ -126,6 +127,22 @@ export class PolarisClient {
     this._timeout = options.timeout ?? 30_000;
     this._fetch = options.fetch ?? globalThis.fetch;
     this._root = resolveRoot(options.datasetRoot);
+    this._storage = options.storage;
+  }
+
+  // ---------------------------------------------------------------------
+  // Storage initialization (lazy)
+  // ---------------------------------------------------------------------
+
+  /**
+   * Get or create the storage implementation.
+   * Lazily initialized on first use.
+   */
+  private async _getStorage(): Promise<IStorage> {
+    if (!this._storage) {
+      this._storage = await createStorage({ root: this._root });
+    }
+    return this._storage;
   }
 
   // -----------------------------------------------------------------------
@@ -673,8 +690,9 @@ export class PolarisClient {
       );
     }
 
+    const storage = await this._getStorage();
     for (const filePath of coverage.paths) {
-      const lines = await readSnapshotLines(filePath);
+      const lines = await readSnapshotLines(storage, filePath);
       for (const line of lines) {
         let event: Json;
         try {
@@ -792,7 +810,8 @@ export class PolarisClient {
     const paths: string[] = [];
     for (const snapshot of selectedSnapshots) {
       const local = localByKey.get(snapshot.key);
-      if (!local || !(await fileExists(local.path))) {
+      const storage = await this._getStorage();
+      if (!local || !(await fileExists(storage, local.path))) {
         throw new PolarisError(
           "Selected standardized snapshots could not be materialized locally",
         );
@@ -952,21 +971,22 @@ export class PolarisClient {
     market: string,
     dates: string[],
   ): Promise<LocalSnapshotFileEntry[]> {
+    const storage = await this._getStorage();
     const snapshots: LocalSnapshotFileEntry[] = [];
 
     for (const date of dates) {
-      const dir = join(layout.dataDir, "standard", source, market, date);
+      const dir = storage.join(layout.dataDir, "standard", source, market, date);
       let entries;
       try {
-        entries = await readdir(dir, { withFileTypes: true });
+        entries = await storage.readdir(dir);
       } catch {
         continue;
       }
 
       for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith(".jsonl.zst")) continue;
+        if (!entry.endsWith(".jsonl.zst")) continue;
 
-        const key = entry.name.slice(0, -".jsonl.zst".length);
+        const key = entry.slice(0, -".jsonl.zst".length);
         try {
           const parsed = parseSnapshotKey(key);
           if (
@@ -978,7 +998,7 @@ export class PolarisClient {
             continue;
           }
 
-          const path = join(dir, entry.name);
+          const path = storage.join(dir, entry);
           snapshots.push({
             key,
             source,
@@ -1076,7 +1096,8 @@ export class PolarisClient {
     url: string,
     dataPath: string,
   ): Promise<void> {
-    if (await fileExists(dataPath)) return;
+    const storage = await this._getStorage();
+    if (await fileExists(storage, dataPath)) return;
 
     const response = await this._request(url, {
       auth: "none",
@@ -1089,9 +1110,9 @@ export class PolarisClient {
       );
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    await mkdir(dirname(dataPath), { recursive: true });
-    await writeFile(dataPath, buffer);
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    await storage.mkdir(storage.dirname(dataPath));
+    await storage.writeFile(dataPath, buffer);
   }
 
   // -----------------------------------------------------------------------
@@ -1224,7 +1245,10 @@ export class PolarisClient {
   // -----------------------------------------------------------------------
 
   private async _getLayout(): Promise<StorageLayout> {
-    if (!this._layout) this._layout = await ensureLayout(this._root);
+    if (!this._layout) {
+      const storage = await this._getStorage();
+      this._layout = await ensureLayout(storage, this._root);
+    }
     return this._layout;
   }
 }
@@ -1947,8 +1971,8 @@ function assertOk(response: Response, body: string): void {
 // Snapshot file reading (zstd + NDJSON)
 // ---------------------------------------------------------------------------
 
-async function readSnapshotLines(filePath: string): Promise<string[]> {
-  const compressed = await readFile(filePath);
+async function readSnapshotLines(storage: IStorage, filePath: string): Promise<string[]> {
+  const compressed = await storage.readFile(filePath);
   const decompressed = decompress(compressed);
   const text = new TextDecoder().decode(decompressed);
   return text.split("\n").filter((l) => l.trim().length > 0);

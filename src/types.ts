@@ -290,6 +290,11 @@ export interface PolarisClientOptions {
    */
   datasetRoot?: string;
   /**
+   * Maximum number of snapshot artifact downloads to run concurrently.
+   * Defaults to `8`.
+   */
+  snapshotDownloadConcurrency?: number;
+  /**
    * Custom storage implementation (useful for testing or advanced scenarios).
    * If not provided, storage is automatically detected based on platform.
    */

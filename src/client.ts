@@ -106,6 +106,7 @@ interface LocalSnapshotFileEntry extends SnapshotEntry {
 }
 
 const DEFAULT_INFERRED_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1_000;
+const DEFAULT_SNAPSHOT_DOWNLOAD_CONCURRENCY = 8;
 
 // ===========================================================================
 // BasePolarisClient
@@ -118,6 +119,7 @@ export class BasePolarisClient {
   private readonly _fetch: FetchLike;
   private readonly _root: string;
   private readonly _runtime: PolarisRuntime;
+  private readonly _snapshotDownloadConcurrency: number;
   private _storage: IStorage | undefined;
   private _layout: StorageLayout | undefined;
 
@@ -131,6 +133,9 @@ export class BasePolarisClient {
     this._fetch = options.fetch ?? globalThis.fetch;
     this._root = runtime.resolveRoot(options.datasetRoot);
     this._runtime = runtime;
+    this._snapshotDownloadConcurrency = normalizePositiveInteger(
+      options.snapshotDownloadConcurrency,
+    ) ?? DEFAULT_SNAPSHOT_DOWNLOAD_CONCURRENCY;
     this._storage = options.storage;
   }
 
@@ -1031,6 +1036,8 @@ export class BasePolarisClient {
     snapshots: SnapshotEntry[],
     layout: StorageLayout,
   ): Promise<LocalSnapshotFileEntry[]> {
+    if (snapshots.length === 0) return [];
+
     const grouped = new Map<string, SnapshotEntry[]>();
     for (const snapshot of snapshots) {
       const source = snapshot.source ?? inferredSnapshotSource(snapshot.key);
@@ -1048,31 +1055,45 @@ export class BasePolarisClient {
       grouped.set(groupKey, group);
     }
 
-    for (const group of grouped.values()) {
-      const first = group[0];
-      const manifest = await this.getSnapshotDownloadUrls({
-        source: first.source as string,
-        market: first.market as string,
-        date: first.date as string,
-      });
-      const manifestUrls = new Map(
-        manifest.snapshots.map((entry) => [entry.key, entry.url] as const),
-      );
-
-      for (const snapshot of group) {
-        const url = manifestUrls.get(snapshot.key);
-        if (!url) {
-          throw new NotFoundError(
-            `Bulk download manifest did not include selected snapshot '${snapshot.key}'`,
+    const downloadJobs = (
+      await this._mapWithConcurrency(
+        Array.from(grouped.values()),
+        this._snapshotDownloadConcurrency,
+        async (group) => {
+          const first = group[0];
+          const manifest = await this.getSnapshotDownloadUrls({
+            source: first.source as string,
+            market: first.market as string,
+            date: first.date as string,
+          });
+          const manifestUrls = new Map(
+            manifest.snapshots.map((entry) => [entry.key, entry.url] as const),
           );
-        }
 
-        await this._downloadSnapshotFromUrl(
-          url,
-          dataFilePath(layout.dataDir, snapshot.key),
-        );
-      }
-    }
+          return group.map((snapshot) => {
+            const url = manifestUrls.get(snapshot.key);
+            if (!url) {
+              throw new NotFoundError(
+                `Bulk download manifest did not include selected snapshot '${snapshot.key}'`,
+              );
+            }
+
+            return {
+              url,
+              dataPath: dataFilePath(layout.dataDir, snapshot.key),
+            };
+          });
+        },
+      )
+    ).flat();
+
+    await this._runWithConcurrency(
+      downloadJobs,
+      this._snapshotDownloadConcurrency,
+      async ({ url, dataPath }) => {
+        await this._downloadSnapshotFromUrl(url, dataPath);
+      },
+    );
 
     const ensured = await this._listLocalSnapshots(
       layout,
@@ -1117,6 +1138,43 @@ export class BasePolarisClient {
     const buffer = new Uint8Array(await response.arrayBuffer());
     await storage.mkdir(storage.dirname(dataPath));
     await storage.writeFile(dataPath, buffer);
+  }
+
+  private async _runWithConcurrency<T>(
+    items: T[],
+    concurrency: number,
+    worker: (item: T, index: number) => Promise<void>,
+  ): Promise<void> {
+    await this._mapWithConcurrency(items, concurrency, async (item, index) => {
+      await worker(item, index);
+      return undefined;
+    });
+  }
+
+  private async _mapWithConcurrency<T, U>(
+    items: T[],
+    concurrency: number,
+    worker: (item: T, index: number) => Promise<U>,
+  ): Promise<U[]> {
+    if (items.length === 0) return [];
+
+    const limit = Math.max(1, Math.min(concurrency, items.length));
+    const results = new Array<U>(items.length);
+    let cursor = 0;
+
+    const runWorker = async () => {
+      while (true) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= items.length) return;
+        results[index] = await worker(items[index], index);
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: limit }, () => runWorker()),
+    );
+    return results;
   }
 
   // -----------------------------------------------------------------------
@@ -2048,4 +2106,11 @@ function endOfPublicCutoffDayMs(
   if (Number.isNaN(startMs)) return undefined;
 
   return startMs + 24 * 60 * 60 * 1000;
+}
+
+function normalizePositiveInteger(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value)) return undefined;
+
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
 }

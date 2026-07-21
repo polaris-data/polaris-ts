@@ -26,8 +26,8 @@ jobs:
 
       - run: npm run build
 
-      - run: node -e "require('./dist/index.cjs')"  # smoke test CJS
+      - run: node -e "require('polaris-data')"  # smoke test CJS package entrypoint
         name: Smoke test (CJS)
 
-      - run: node --input-type=module -e "import './dist/index.js'"  # smoke test ESM
+      - run: node --input-type=module -e "import 'polaris-data'"  # smoke test ESM package entrypoint
         name: Smoke test (ESM)

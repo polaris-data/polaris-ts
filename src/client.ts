@@ -42,7 +42,6 @@ import {
 
 import { toIso8601, toEpochMs, datesInRange } from "./utils";
 import {
-  resolveRoot,
   ensureLayout,
   dataFilePath,
   parseSnapshotKey,
@@ -53,7 +52,7 @@ import {
 } from "./storage";
 import { OhlcvAggregator } from "./aggregator";
 import type { IStorage } from "./storage/interface";
-import { createStorage } from "./storage/interface";
+import type { PolarisRuntime } from "./runtime/types";
 
 // ---------------------------------------------------------------------------
 // SDK version – bumped manually during releases
@@ -109,24 +108,29 @@ interface LocalSnapshotFileEntry extends SnapshotEntry {
 const DEFAULT_INFERRED_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1_000;
 
 // ===========================================================================
-// PolarisClient
+// BasePolarisClient
 // ===========================================================================
 
-export class PolarisClient {
+export class BasePolarisClient {
   private readonly _apiKey: string | undefined;
   private readonly _baseUrl: URL;
   private readonly _timeout: number;
   private readonly _fetch: FetchLike;
   private readonly _root: string;
+  private readonly _runtime: PolarisRuntime;
   private _storage: IStorage | undefined;
   private _layout: StorageLayout | undefined;
 
-  constructor(options: PolarisClientOptions = {}) {
-    this._apiKey = options.apiKey ?? readEnvApiKey();
+  constructor(
+    options: PolarisClientOptions = {},
+    runtime: PolarisRuntime,
+  ) {
+    this._apiKey = runtime.resolveApiKey(options.apiKey);
     this._baseUrl = new URL(options.baseUrl ?? "https://api.polaris.supply");
     this._timeout = options.timeout ?? 30_000;
     this._fetch = options.fetch ?? globalThis.fetch;
-    this._root = resolveRoot(options.datasetRoot);
+    this._root = runtime.resolveRoot(options.datasetRoot);
+    this._runtime = runtime;
     this._storage = options.storage;
   }
 
@@ -140,7 +144,7 @@ export class PolarisClient {
    */
   private async _getStorage(): Promise<IStorage> {
     if (!this._storage) {
-      this._storage = await createStorage({ root: this._root });
+      this._storage = await this._runtime.createStorage(this._root);
     }
     return this._storage;
   }
@@ -1368,14 +1372,6 @@ class VolatilityAggregator {
           returns: state.returns,
         }];
       });
-  }
-}
-
-function readEnvApiKey(): string | undefined {
-  try {
-    return process?.env?.POLARIS_API_KEY;
-  } catch {
-    return undefined;
   }
 }
 

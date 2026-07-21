@@ -12,60 +12,6 @@ export interface StorageLayout {
 }
 
 // ---------------------------------------------------------------------------
-// Root resolution (Node.js only, deprecated in browser)
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the local dataset root for Node.js environments.
- *
- * Priority: explicit → `POLARIS_ROOT` → `POLARIS_DATASET_DOWNLOAD_DIR`
- * (deprecated) → platform default.
- *
- * @deprecated For browser environments, root is handled by BrowserStorage.
- * Use createStorage() for automatic platform detection.
- */
-export function resolveRoot(explicit?: string): string {
-  if (explicit) return explicit;
-  if (typeof process !== "undefined" && process.env?.POLARIS_ROOT) return process.env.POLARIS_ROOT;
-  if (typeof process !== "undefined" && process.env?.POLARIS_DATASET_DOWNLOAD_DIR)
-    return process.env.POLARIS_DATASET_DOWNLOAD_DIR;
-  return defaultRoot();
-}
-
-function defaultRoot(): string {
-  // Dynamic import to avoid browser import issues
-  if (typeof process === "undefined") {
-    throw new Error("Default root resolution is Node.js only. Use createStorage() for browser support.");
-  }
-
-  // Import Node.js modules only in Node environment
-  const { homedir, platform } = require("node:os");
-  const { join } = require("node:path");
-
-  switch (platform()) {
-    case "darwin":
-      return join(
-        homedir(),
-        "Library",
-        "Application Support",
-        "polaris",
-      );
-    case "win32":
-      return join(
-        process.env.APPDATA ||
-          join(homedir(), "AppData", "Roaming"),
-        "polaris",
-      );
-    default:
-      return (
-        process.env.XDG_DATA_HOME
-          ? join(process.env.XDG_DATA_HOME, "polaris")
-          : join(homedir(), ".local", "share", "polaris")
-      );
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Layout bootstrapping (using storage interface)
 // ---------------------------------------------------------------------------
 

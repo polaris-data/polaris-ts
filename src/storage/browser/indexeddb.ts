@@ -4,7 +4,10 @@ import type { StorageLayout } from "../../storage";
 // TypeScript types for IndexedDB
 interface IDBDatabase {
   close(): void;
-  objectStoreNames: string[];
+  createObjectStore(name: string): IDBObjectStore;
+  objectStoreNames: {
+    contains(name: string): boolean;
+  };
   transaction(storeNames: string | string[], mode: IDBTransactionMode): IDBTransaction;
 }
 

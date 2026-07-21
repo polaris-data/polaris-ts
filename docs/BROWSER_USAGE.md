@@ -38,11 +38,11 @@ The API is identical between Node.js and browser environments. The SDK automatic
 ### Initialization
 
 ```typescript
-import { createClient } from 'polaris-data';
+import { PolarisClient } from "polaris-data";
 
 // The SDK automatically detects browser environment
-const client = createClient({
-  apiKey: 'your-api-key', // Optional, can also use POLARIS_API_KEY env var
+const client = new PolarisClient({
+  apiKey: "your-api-key",
 });
 ```
 
@@ -196,11 +196,11 @@ Existing Node.js code works without modifications:
 
 ```typescript
 // This code works in both Node.js and browser
-import { createClient } from 'polaris-data';
+import { PolarisClient } from "polaris-data";
 
-const client = createClient({
-  apiKey: process.env.POLARIS_API_KEY,
-  datasetRoot: './data', // Only used in Node.js
+const client = new PolarisClient({
+  apiKey: "your-api-key",
+  datasetRoot: "./data", // Only used in Node.js
 });
 
 const data = await client.trades({ /* ... */ });
@@ -209,7 +209,7 @@ const data = await client.trades({ /* ... */ });
 ### Browser-Specific Notes
 
 - **`datasetRoot` Option**: Ignored in browser (uses IndexedDB)
-- **Environment Variables**: Use explicit options or browser storage
+- **Environment Variables**: Browser builds do not read `POLARIS_API_KEY`; pass `apiKey` explicitly
 - **File Paths**: Virtual paths used internally in browser
 
 ## Examples
@@ -217,10 +217,10 @@ const data = await client.trades({ /* ... */ });
 ### Real-Time Chart Application
 
 ```typescript
-import { createClient } from 'polaris-data';
+import { PolarisClient } from "polaris-data";
 
-const client = createClient({
-  apiKey: 'your-api-key',
+const client = new PolarisClient({
+  apiKey: "your-api-key",
 });
 
 async function loadChartData() {
@@ -249,10 +249,10 @@ updateChart(chartData);
 ### Market Analysis Dashboard
 
 ```typescript
-import { createClient } from 'polaris-data';
+import { PolarisClient } from "polaris-data";
 
-const client = createClient({
-  apiKey: 'your-api-key',
+const client = new PolarisClient({
+  apiKey: "your-api-key",
 });
 
 async function loadMarketAnalysis() {
@@ -304,8 +304,8 @@ updateDashboard(analysis);
 Enable detailed logging:
 
 ```typescript
-const client = createClient({
-  apiKey: 'your-api-key',
+const client = new PolarisClient({
+  apiKey: "your-api-key",
   // Add logging for debugging
 });
 ```

@@ -59,7 +59,7 @@ import { createStorage } from "./storage/interface";
 // SDK version – bumped manually during releases
 // ---------------------------------------------------------------------------
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 // ---------------------------------------------------------------------------
 // Internal shorthand

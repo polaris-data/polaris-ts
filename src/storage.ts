@@ -1,6 +1,4 @@
-import { mkdir, stat } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir, platform } from "node:os";
+import type { IStorage } from "./storage/interface";
 
 // ---------------------------------------------------------------------------
 // StorageLayout
@@ -14,24 +12,36 @@ export interface StorageLayout {
 }
 
 // ---------------------------------------------------------------------------
-// Root resolution
+// Root resolution (Node.js only, deprecated in browser)
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the local dataset root.
+ * Resolve the local dataset root for Node.js environments.
  *
  * Priority: explicit → `POLARIS_ROOT` → `POLARIS_DATASET_DOWNLOAD_DIR`
  * (deprecated) → platform default.
+ *
+ * @deprecated For browser environments, root is handled by BrowserStorage.
+ * Use createStorage() for automatic platform detection.
  */
 export function resolveRoot(explicit?: string): string {
   if (explicit) return explicit;
-  if (process.env.POLARIS_ROOT) return process.env.POLARIS_ROOT;
-  if (process.env.POLARIS_DATASET_DOWNLOAD_DIR)
+  if (typeof process !== "undefined" && process.env?.POLARIS_ROOT) return process.env.POLARIS_ROOT;
+  if (typeof process !== "undefined" && process.env?.POLARIS_DATASET_DOWNLOAD_DIR)
     return process.env.POLARIS_DATASET_DOWNLOAD_DIR;
   return defaultRoot();
 }
 
 function defaultRoot(): string {
+  // Dynamic import to avoid browser import issues
+  if (typeof process === "undefined") {
+    throw new Error("Default root resolution is Node.js only. Use createStorage() for browser support.");
+  }
+
+  // Import Node.js modules only in Node environment
+  const { homedir, platform } = require("node:os");
+  const { join } = require("node:path");
+
   switch (platform()) {
     case "darwin":
       return join(
@@ -56,22 +66,12 @@ function defaultRoot(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Layout bootstrapping
+// Layout bootstrapping (using storage interface)
 // ---------------------------------------------------------------------------
 
 /** Ensure the standard sub-directory tree exists and return the layout. */
-export async function ensureLayout(root: string): Promise<StorageLayout> {
-  const dataDir = join(root, "data");
-  const tmpDir = join(root, "tmp");
-  const cacheDir = join(root, "cache");
-
-  await Promise.all([
-    mkdir(dataDir, { recursive: true }),
-    mkdir(tmpDir, { recursive: true }),
-    mkdir(cacheDir, { recursive: true }),
-  ]);
-
-  return { root, dataDir, tmpDir, cacheDir };
+export async function ensureLayout(storage: IStorage, root: string): Promise<StorageLayout> {
+  return await storage.ensureLayout(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -175,24 +175,14 @@ export function inferSnapshotEndMs(
 /** Path for a downloaded snapshot file in the Rust-style `data/` tree. */
 export function dataFilePath(dataDir: string, key: string): string {
   const parsed = parseSnapshotKey(key);
-  return join(
-    dataDir,
-    parsed.tier,
-    parsed.source,
-    parsed.market,
-    parsed.date,
-    parsed.filename,
-  );
+  // Use storage interface for path joining when available
+  // For now, use simple path construction (will be storage-aware in context)
+  return `${dataDir}/${parsed.tier}/${parsed.source}/${parsed.market}/${parsed.date}/${parsed.filename}`;
 }
 
-/** Return `true` when the file at `path` exists. */
-export async function fileExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
+/** Return `true` when the file at `path` exists (using storage interface). */
+export async function fileExists(storage: IStorage, path: string): Promise<boolean> {
+  return await storage.exists(path);
 }
 
 function parseSnapshotTimeSuffix(

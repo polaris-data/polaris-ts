@@ -1,7 +1,7 @@
 {
   "name": "polaris-data",
   "version": "0.4.0",
-  "description": "TypeScript SDK for the Polaris market data API",
+  "description": "TypeScript SDK for the Polaris market data API (Node.js and browser)",
   "license": "MIT",
   "author": "Polaris <hello@polaris.supply>",
   "homepage": "https://polaris.supply",
@@ -10,14 +10,23 @@
     "url": "https://github.com/polaris-data/polaris-ts"
   },
   "type": "module",
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/node/index.cjs",
+  "module": "./dist/node/index.js",
+  "types": "./dist/node/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "node": {
+        "types": "./dist/node/index.d.ts",
+        "import": "./dist/node/index.js",
+        "require": "./dist/node/index.cjs"
+      },
+      "browser": {
+        "types": "./dist/browser/index.d.ts",
+        "import": "./dist/browser/index.js"
+      },
+      "types": "./dist/node/index.d.ts",
+      "import": "./dist/node/index.js",
+      "require": "./dist/node/index.cjs"
     }
   },
   "files": [
@@ -49,7 +58,10 @@
     "sdk",
     "ohlcv",
     "trades",
-    "events"
+    "events",
+    "browser",
+    "web",
+    "client-side"
   ],
   "dependencies": {
     "fzstd": "^0.1.1"

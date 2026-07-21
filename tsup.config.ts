@@ -3,7 +3,9 @@ import { defineConfig } from "tsup";
 export default defineConfig([
   // Node.js build (current, maintained for backward compatibility)
   {
-    entry: ["src/index.ts"],
+    entry: {
+      index: "src/index.node.ts",
+    },
     format: ["esm", "cjs"],
     dts: true,
     sourcemap: true,
@@ -14,7 +16,9 @@ export default defineConfig([
   },
   // Browser build (new, for browser environments)
   {
-    entry: ["src/index.ts"],
+    entry: {
+      index: "src/index.browser.ts",
+    },
     format: ["esm"],
     dts: true,
     sourcemap: true,
